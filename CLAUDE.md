@@ -33,6 +33,7 @@ src/wrds_mcp/
 | `crsp.dsf_v2` | Daily stock prices, returns, volume, market cap |
 | `crsp.msf_v2` | Monthly stock data (auto-selected for long ranges) |
 | `trace.trace` | Raw FINRA TRACE bond transactions (most current, needs filtering) |
+| `trace.trace_btds144a` | 144A private placement bond transactions (auto-fallback) |
 | `wrdsapps_bondret.trace_enhanced_clean` | Cleaned TRACE (research quality, ~12 month lag) |
 | `wrdsapps_bondret.bondret` | Monthly bond returns, yield, spread, duration, multi-agency ratings |
 | `fisd.fisd_mergedissue` | Bond characteristics (CUSIP, coupon, maturity) |
@@ -55,9 +56,10 @@ src/wrds_mcp/
 ## Key Design Decisions
 
 - **Auto-routing:** Bond price/yield tools auto-route between `trace_enhanced_clean` (historical, research quality) and `trace.trace` (recent, raw) based on whether end_date is within the last ~12 months
+- **144A fallback:** When standard TRACE tables return empty, bond tools automatically check `trace.trace_btds144a` for 144A private placements (e.g., PRKS/SeaWorld bonds)
 - **Discovery tool:** `get_data_catalog()` queries live date ranges so Claude knows what data exists and which tool to use
 - **Ratings primary source:** `wrdsapps_bondret.bondret` provides S&P + Moody's + Fitch through latest month; `comp.adsprate` is fallback only (ended Feb 2017)
-- **FISD ticker matching:** Uses issuer_id subquery pattern because many bonds have NULL ticker in fisd_mergedissue
+- **FISD ticker matching:** Uses issuer_id subquery pattern because many bonds have NULL ticker in fisd_mergedissue. Falls back to Compustat CUSIP linkage (5-char prefix match) when FISD has no ticker at all
 
 ## Conventions
 

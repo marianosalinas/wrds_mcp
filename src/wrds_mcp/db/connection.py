@@ -167,6 +167,36 @@ def resolve_ticker_to_gvkey(conn: WRDSConnection, ticker: str) -> str | None:
     return str(df.iloc[0]["gvkey"])
 
 
+def resolve_ticker_to_fisd_issuer(conn: WRDSConnection, ticker: str) -> int | None:
+    """Resolve a ticker to a FISD issuer_id via Compustat CUSIP linkage.
+
+    Many FISD bonds have NULL ticker. This function bridges the gap:
+    ticker → Compustat equity CUSIP → first 5 chars → FISD issuer_cusip.
+
+    Args:
+        conn: Active WRDS connection.
+        ticker: Company ticker symbol (e.g., 'PRKS').
+
+    Returns:
+        The FISD issuer_id (int), or None if not found.
+    """
+    logger.debug("Resolving ticker '%s' to FISD issuer_id via CUSIP", ticker)
+    df = conn.raw_sql(
+        """
+        SELECT DISTINCT fi.issuer_id
+        FROM comp.security s
+        JOIN fisd.fisd_mergedissue fi
+            ON LEFT(fi.issuer_cusip, 5) = LEFT(s.cusip, 5)
+        WHERE UPPER(s.tic) = :ticker
+        LIMIT 1
+        """,
+        params={"ticker": ticker.upper()},
+    )
+    if df.empty:
+        return None
+    return int(df.iloc[0]["issuer_id"])
+
+
 @lifespan
 async def wrds_lifespan(server):
     """FastMCP lifespan: connect to WRDS on startup, close on shutdown."""

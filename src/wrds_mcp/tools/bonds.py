@@ -17,7 +17,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from wrds_mcp.db.connection import get_wrds_connection
+from wrds_mcp.db.connection import get_wrds_connection, resolve_ticker_to_fisd_issuer
 from wrds_mcp.tools._validation import (
     df_to_records,
     validate_cusip,
@@ -43,13 +43,120 @@ def _should_use_raw_trace(end_date: str) -> bool:
 
 
 def _issuer_ticker_filter(alias: str = "fi") -> str:
-    """Standard FISD ticker matching with issuer_id fallback."""
+    """FISD ticker matching with issuer_id fallback.
+
+    Matches by ticker on fisd_mergedissue, OR by issuer_id if another
+    bond from the same issuer has the ticker. The :issuer_id_fallback
+    param handles cases where FISD has no ticker at all (resolved via
+    Compustat CUSIP linkage before the query).
+    """
     return f"""(UPPER({alias}.ticker) = :ticker
                OR {alias}.issuer_id IN (
                    SELECT DISTINCT fi2.issuer_id
                    FROM fisd.fisd_mergedissue fi2
                    WHERE UPPER(fi2.ticker) = :ticker
-               ))"""
+               )
+               OR (:issuer_id_fallback IS NOT NULL
+                   AND {alias}.issuer_id = :issuer_id_fallback))"""
+
+
+def _resolve_issuer_fallback(conn, ticker: str) -> int | None:
+    """Try to resolve ticker to FISD issuer_id via Compustat CUSIP linkage.
+
+    Used when FISD has no ticker for the issuer's bonds.
+    """
+    return resolve_ticker_to_fisd_issuer(conn, ticker)
+
+
+def _get_company_cusips(conn, ticker: str, issuer_fb: int | None) -> list[str]:
+    """Get all CUSIPs for a company from FISD (used for 144A fallback)."""
+    query = f"""
+        SELECT DISTINCT fi.complete_cusip
+        FROM fisd.fisd_mergedissue fi
+        WHERE {_issuer_ticker_filter('fi')}
+    """
+    try:
+        df = conn.raw_sql(query, params={"ticker": ticker, "issuer_id_fallback": issuer_fb})
+        return df["complete_cusip"].tolist() if not df.empty else []
+    except Exception:
+        return []
+
+
+def _query_144a_price_history(conn, cusips: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+    """Query trace_btds144a for price/yield history (fallback for 144A bonds).
+
+    Uses simple averages since the 144A volume field is text (not numeric).
+    """
+    if not cusips:
+        return pd.DataFrame()
+    placeholders = ", ".join(f":cusip_{i}" for i in range(len(cusips)))
+    params = {f"cusip_{i}": c for i, c in enumerate(cusips)}
+    params["start_date"] = start_date
+    params["end_date"] = end_date
+
+    query = f"""
+        SELECT cusip_id AS cusip,
+               trd_exctn_dt AS date,
+               AVG(rptd_pr) AS avg_price,
+               AVG(yld_pt) AS avg_yield,
+               COUNT(*) AS num_trades
+        FROM trace.trace_btds144a
+        WHERE cusip_id IN ({placeholders})
+          AND trd_exctn_dt BETWEEN :start_date AND :end_date
+          AND trc_st NOT IN ('C', 'W')
+          AND rptd_pr IS NOT NULL
+        GROUP BY cusip_id, trd_exctn_dt
+        ORDER BY cusip_id, trd_exctn_dt
+    """
+    return conn.raw_sql(query, params=params, date_cols=["date"])
+
+
+def _query_144a_transactions(conn, cusips: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+    """Query trace_btds144a for individual transactions."""
+    if not cusips:
+        return pd.DataFrame()
+    placeholders = ", ".join(f":cusip_{i}" for i in range(len(cusips)))
+    params = {f"cusip_{i}": c for i, c in enumerate(cusips)}
+    params["start_date"] = start_date
+    params["end_date"] = end_date
+
+    query = f"""
+        SELECT cusip_id AS cusip,
+               trd_exctn_dt AS trade_date,
+               trd_exctn_tm AS trade_time,
+               rptd_pr AS price,
+               yld_pt AS yield_pct,
+               ascii_rptd_vol_tx AS volume,
+               bond_sym_id AS bond_symbol
+        FROM trace.trace_btds144a
+        WHERE cusip_id IN ({placeholders})
+          AND trd_exctn_dt BETWEEN :start_date AND :end_date
+          AND trc_st NOT IN ('C', 'W')
+        ORDER BY trd_exctn_dt, trd_exctn_tm
+    """
+    return conn.raw_sql(query, params=params, date_cols=["trade_date"])
+
+
+def _query_144a_yield_history(conn, cusip: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Query trace_btds144a for yield time series on a single CUSIP."""
+    query = """
+        SELECT trd_exctn_dt AS date,
+               AVG(yld_pt) AS avg_yield,
+               AVG(rptd_pr) AS avg_price,
+               COUNT(*) AS num_trades
+        FROM trace.trace_btds144a
+        WHERE cusip_id = :cusip
+          AND trd_exctn_dt BETWEEN :start_date AND :end_date
+          AND trc_st NOT IN ('C', 'W')
+          AND yld_pt IS NOT NULL
+        GROUP BY trd_exctn_dt
+        ORDER BY trd_exctn_dt
+    """
+    return conn.raw_sql(
+        query,
+        params={"cusip": cusip, "start_date": start_date, "end_date": end_date},
+        date_cols=["date"],
+    )
 
 
 @bonds_mcp.tool
@@ -75,6 +182,7 @@ def get_bond_price_history(
     ticker = validate_ticker(ticker)
     start_date, end_date = validate_date_range(start_date, end_date)
     conn = get_wrds_connection()
+    issuer_fb = _resolve_issuer_fallback(conn, ticker)
 
     use_raw = _should_use_raw_trace(end_date)
 
@@ -130,14 +238,23 @@ def get_bond_price_history(
     try:
         df = conn.raw_sql(
             query,
-            params={"ticker": ticker, "start_date": start_date, "end_date": end_date},
+            params={"ticker": ticker, "start_date": start_date, "end_date": end_date, "issuer_id_fallback": issuer_fb},
             date_cols=["date"],
         )
     except Exception as e:
         raise ToolError(f"WRDS query failed: {e}")
 
     if df.empty:
-        return [{"message": f"No bond price data for {ticker} between {start_date} and {end_date}.", "source": source}]
+        # Fallback: try 144A TRACE for private placements
+        cusips = _get_company_cusips(conn, ticker, issuer_fb)
+        try:
+            df = _query_144a_price_history(conn, cusips, start_date, end_date)
+        except Exception:
+            df = pd.DataFrame()
+
+        if df.empty:
+            return [{"message": f"No bond price data for {ticker} between {start_date} and {end_date}.", "source": source}]
+        source = "trace.trace_btds144a (144A)"
 
     records = df_to_records(df)
     for r in records:
@@ -165,6 +282,7 @@ def get_bond_transactions(
     ticker = validate_ticker(ticker)
     start_date, end_date = validate_date_range(start_date, end_date)
     conn = get_wrds_connection()
+    issuer_fb = _resolve_issuer_fallback(conn, ticker)
 
     use_raw = _should_use_raw_trace(end_date)
 
@@ -212,14 +330,22 @@ def get_bond_transactions(
     try:
         df = conn.raw_sql(
             query,
-            params={"ticker": ticker, "start_date": start_date, "end_date": end_date},
+            params={"ticker": ticker, "start_date": start_date, "end_date": end_date, "issuer_id_fallback": issuer_fb},
             date_cols=["trade_date"],
         )
     except Exception as e:
         raise ToolError(f"WRDS query failed: {e}")
 
     if df.empty:
-        return [{"message": f"No TRACE transactions found for {ticker} between {start_date} and {end_date}."}]
+        # Fallback: try 144A TRACE for private placements
+        cusips = _get_company_cusips(conn, ticker, issuer_fb)
+        try:
+            df = _query_144a_transactions(conn, cusips, start_date, end_date)
+        except Exception:
+            df = pd.DataFrame()
+
+        if df.empty:
+            return [{"message": f"No TRACE transactions found for {ticker} between {start_date} and {end_date}."}]
 
     return df_to_records(df)
 
@@ -293,7 +419,14 @@ def get_bond_yield_history(
         raise ToolError(f"WRDS query failed: {e}")
 
     if df.empty:
-        return [{"message": f"No yield data found for CUSIP {cusip} between {start_date} and {end_date}."}]
+        # Fallback: try 144A TRACE for private placements
+        try:
+            df = _query_144a_yield_history(conn, cusip, start_date, end_date)
+        except Exception:
+            df = pd.DataFrame()
+
+        if df.empty:
+            return [{"message": f"No yield data found for CUSIP {cusip} between {start_date} and {end_date}."}]
 
     return df_to_records(df)
 
@@ -315,6 +448,7 @@ def get_company_bonds(
     """
     ticker = validate_ticker(ticker)
     conn = get_wrds_connection()
+    issuer_fb = _resolve_issuer_fallback(conn, ticker)
 
     query = f"""
         SELECT fi.complete_cusip AS cusip,
@@ -342,7 +476,7 @@ def get_company_bonds(
     try:
         df = conn.raw_sql(
             query,
-            params={"ticker": ticker},
+            params={"ticker": ticker, "issuer_id_fallback": issuer_fb},
             date_cols=["maturity", "offering_date"],
         )
     except Exception as e:
@@ -377,13 +511,12 @@ def get_bond_returns(
     conn = get_wrds_connection()
 
     query = """
-        SELECT complete_cusip AS cusip,
+        SELECT cusip,
                date,
-               bond_ret,
-               tmt_yld,
+               ret_eom AS bond_ret,
+               yield AS bond_yield,
                t_yld_pt AS treasury_yield,
-               cs_yld_pt AS credit_spread,
-               oas,
+               t_spread AS credit_spread,
                duration,
                price_eom AS price,
                amount_outstanding,
@@ -395,7 +528,7 @@ def get_bond_returns(
         FROM wrdsapps_bondret.bondret
         WHERE UPPER(company_symbol) = :ticker
           AND date BETWEEN :start_date AND :end_date
-        ORDER BY complete_cusip, date
+        ORDER BY cusip, date
     """
 
     logger.debug(
@@ -435,6 +568,7 @@ def get_bond_covenants(
     """
     ticker = validate_ticker(ticker)
     conn = get_wrds_connection()
+    issuer_fb = _resolve_issuer_fallback(conn, ticker)
 
     # First get the company's bond CUSIPs via the issuer_id pattern
     cusip_query = f"""
@@ -450,7 +584,7 @@ def get_bond_covenants(
     logger.debug("get_bond_covenants: ticker=%s", ticker)
 
     try:
-        bonds_df = conn.raw_sql(cusip_query, params={"ticker": ticker}, date_cols=["maturity"])
+        bonds_df = conn.raw_sql(cusip_query, params={"ticker": ticker, "issuer_id_fallback": issuer_fb}, date_cols=["maturity"])
     except Exception as e:
         raise ToolError(f"WRDS query failed: {e}")
 

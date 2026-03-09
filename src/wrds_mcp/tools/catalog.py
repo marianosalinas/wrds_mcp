@@ -118,6 +118,13 @@ def get_data_catalog(
             "coverage": _query_date_range(conn, "wrdsapps_bondret", "trace_enhanced_clean", "trd_exctn_dt"),
             "use_tool": "get_bond_price_history (auto-routes here for historical dates)",
         }
+        bonds["trace_144a"] = {
+            "source": "trace.trace_btds144a",
+            "description": "144A private placement bond transactions — auto-fallback when standard TRACE is empty",
+            "coverage": _query_date_range(conn, "trace", "trace_btds144a", "trd_exctn_dt"),
+            "note": "Volume is text (ascii_rptd_vol_tx). Uses simple averages, not volume-weighted.",
+            "use_tool": "get_bond_price_history, get_bond_transactions, get_bond_yield_history (automatic 144A fallback)",
+        }
     if _check_schema_exists(conn, "fisd"):
         bonds["bond_characteristics"] = {
             "source": "fisd.fisd_mergedissue + fisd_mergedissuer",

@@ -16,6 +16,13 @@ from wrds_mcp.tools.bonds import (
 )
 
 
+@pytest.fixture(autouse=True)
+def mock_issuer_fallback():
+    """Patch CUSIP-based issuer fallback to return None by default."""
+    with patch("wrds_mcp.tools.bonds.resolve_ticker_to_fisd_issuer", return_value=None):
+        yield
+
+
 @pytest.fixture
 def mock_conn(sample_trace_df, sample_fisd_df):
     """Mock WRDS connection for bond queries."""
