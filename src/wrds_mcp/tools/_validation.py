@@ -1,11 +1,15 @@
-"""Input validation helpers shared across tool modules."""
+"""Input validation and data conversion helpers shared across tool modules."""
 
+import math
 import re
 from datetime import datetime
 
+import pandas as pd
 from fastmcp.exceptions import ToolError
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+MAX_ROWS = 10000
 
 
 def validate_date(value: str, name: str = "date") -> str:
@@ -71,3 +75,34 @@ def validate_cusip(cusip: str) -> str:
             f"Invalid CUSIP '{cusip}'. CUSIP must contain only letters and digits."
         )
     return cleaned
+
+
+def df_to_records(df: pd.DataFrame, max_rows: int = MAX_ROWS) -> list[dict]:
+    """Convert a DataFrame to a list of JSON-serializable dicts.
+
+    Handles NaN -> None, NaT -> None, Timestamp -> ISO string,
+    and truncates to max_rows with a warning.
+    """
+    truncated = False
+    if len(df) > max_rows:
+        df = df.head(max_rows)
+        truncated = True
+
+    records = []
+    for _, row in df.iterrows():
+        record = {}
+        for col, val in row.items():
+            if pd.isna(val):
+                record[col] = None
+            elif isinstance(val, pd.Timestamp):
+                record[col] = val.isoformat()[:10]
+            elif isinstance(val, float) and (math.isinf(val) or math.isnan(val)):
+                record[col] = None
+            else:
+                record[col] = val
+        records.append(record)
+
+    if truncated:
+        records.append({"_truncated": True, "_total_rows": len(df), "_max_rows": max_rows})
+
+    return records
