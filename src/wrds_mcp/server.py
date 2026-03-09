@@ -11,6 +11,7 @@ from wrds_mcp.tools.catalog import catalog_mcp
 from wrds_mcp.tools.equity import equity_mcp
 from wrds_mcp.tools.financials import financials_mcp
 from wrds_mcp.tools.loans import loans_mcp
+from wrds_mcp.tools.query import query_mcp
 from wrds_mcp.tools.ratings import ratings_mcp
 
 load_dotenv()
@@ -30,6 +31,7 @@ mcp.mount(bonds_mcp)
 mcp.mount(ratings_mcp)
 mcp.mount(financials_mcp)
 mcp.mount(loans_mcp)
+mcp.mount(query_mcp)
 
 
 def main():

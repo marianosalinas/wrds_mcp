@@ -58,6 +58,24 @@ def _query_funda(conn, gvkey: str, periods: int, columns: str) -> pd.DataFrame:
     )
 
 
+def _query_fundq(conn, gvkey: str, periods: int, columns: str) -> pd.DataFrame:
+    """Query comp.fundq with standard filters."""
+    query = f"""
+        SELECT gvkey, datadate, fyearq, fqtr, {columns}
+        FROM comp.fundq
+        WHERE gvkey = :gvkey
+          AND indfmt = 'INDL' AND datafmt = 'STD' AND consol = 'C'
+        ORDER BY datadate DESC
+        LIMIT :periods
+    """
+    logger.debug("Querying comp.fundq: gvkey=%s, periods=%d", gvkey, periods)
+    return conn.raw_sql(
+        query,
+        params={"gvkey": gvkey, "periods": periods},
+        date_cols=["datadate"],
+    )
+
+
 @financials_mcp.tool
 def get_leverage_metrics(
     ticker: Annotated[str, Field(description="Company ticker symbol, e.g. 'AAPL'")],
@@ -220,6 +238,79 @@ def get_liquidity_metrics(
         })
 
     return sorted(results, key=lambda x: x.get("datadate") or "")
+
+
+@financials_mcp.tool
+def get_quarterly_leverage(
+    ticker: Annotated[str, Field(description="Company ticker symbol, e.g. 'F' for Ford")],
+    quarters: Annotated[int, Field(description="Number of quarters to retrieve", ge=4, le=40)] = 12,
+    ctx: Context = None,
+) -> list[dict]:
+    """Get quarterly leverage metrics with trailing-twelve-month (TTM) EBITDA.
+
+    Uses comp.fundq for quarterly data. Computes TTM EBITDA as the rolling
+    4-quarter sum, then calculates net debt / TTM EBITDA and gross debt / TTM EBITDA.
+
+    Returns: list of dicts with quarter, datadate, total_debt, ebitda_quarterly,
+    ebitda_ttm, cash, net_debt, net_leverage, gross_leverage, total_assets.
+
+    Example: get_quarterly_leverage("F", quarters=12)
+    """
+    ticker = validate_ticker(ticker)
+    conn = get_wrds_connection()
+
+    gvkey = resolve_ticker_to_gvkey(conn, ticker)
+    if gvkey is None:
+        raise ToolError(f"Ticker '{ticker}' not found in Compustat.")
+
+    # Fetch extra quarters for TTM calculation (need 3 prior to compute first TTM)
+    fetch_count = quarters + 3
+
+    try:
+        df = _query_fundq(conn, gvkey, fetch_count, "dlttq, dlcq, oibdpq, cheq, atq")
+    except Exception as e:
+        raise ToolError(f"WRDS query failed: {e}")
+
+    if df.empty:
+        return [{"message": f"No quarterly data found for {ticker}."}]
+
+    # Sort chronologically for rolling calculation
+    df = df.sort_values("datadate").reset_index(drop=True)
+
+    # Compute TTM EBITDA
+    df["ebitda_q"] = df["oibdpq"].fillna(0)
+    df["ebitda_ttm"] = df["ebitda_q"].rolling(4, min_periods=4).sum()
+    df["total_debt"] = df["dlttq"].fillna(0) + df["dlcq"].fillna(0)
+    df["cash"] = df["cheq"].fillna(0)
+    df["net_debt"] = df["total_debt"] - df["cash"]
+
+    # Drop rows without full TTM, then take the requested number of quarters
+    df = df[df["ebitda_ttm"].notna()].tail(quarters)
+
+    results = []
+    for _, row in df.iterrows():
+        fyear = int(row["fyearq"]) if pd.notna(row.get("fyearq")) else None
+        fqtr = int(row["fqtr"]) if pd.notna(row.get("fqtr")) else None
+        quarter_label = f"FY{fyear}Q{fqtr}" if fyear and fqtr else None
+
+        ttm = row["ebitda_ttm"]
+        net_lev = _safe_divide(row["net_debt"], ttm)
+        gross_lev = _safe_divide(row["total_debt"], ttm)
+
+        results.append({
+            "quarter": quarter_label,
+            "datadate": row["datadate"].isoformat()[:10] if hasattr(row["datadate"], "isoformat") else str(row["datadate"]),
+            "total_debt": _safe_float(row["total_debt"]),
+            "ebitda_quarterly": _safe_float(row["ebitda_q"]),
+            "ebitda_ttm": _safe_float(ttm),
+            "cash": _safe_float(row["cash"]),
+            "net_debt": _safe_float(row["net_debt"]),
+            "net_leverage": net_lev,
+            "gross_leverage": gross_lev,
+            "total_assets": _safe_float(row.get("atq")),
+        })
+
+    return results
 
 
 @financials_mcp.tool

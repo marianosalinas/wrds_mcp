@@ -12,7 +12,13 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from wrds_mcp.db.connection import get_wrds_connection
+from wrds_mcp.db.connection import (
+    get_wrds_connection,
+    resolve_ticker_to_fisd_issuer,
+    resolve_ticker_to_gvkey,
+)
+from wrds_mcp.tools._schema_docs import COLUMN_DOCS
+from wrds_mcp.tools._validation import validate_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -206,3 +212,155 @@ def get_data_catalog(
 
     _catalog_cache = catalog
     return catalog
+
+
+# Allowlist of schemas exposed via get_table_schema
+_SCHEMA_ALLOWLIST = {"comp", "crsp", "trace", "wrdsapps_bondret", "fisd", "dealscan"}
+
+
+@catalog_mcp.tool
+def get_table_schema(
+    schema: Annotated[str, Field(description="Database schema, e.g. 'comp', 'crsp', 'trace'")],
+    table: Annotated[str, Field(description="Table name, e.g. 'funda', 'dsf_v2'")],
+    ctx: Context = None,
+) -> dict:
+    """Get column metadata for a WRDS table.
+
+    Returns column names, data types, nullability, and human-readable
+    descriptions (where available) for the requested table. Also includes
+    an approximate row count.
+
+    Only schemas in the allowlist are permitted:
+    comp, crsp, trace, wrdsapps_bondret, fisd, dealscan.
+
+    Example: get_table_schema(schema="comp", table="funda")
+    """
+    schema = schema.strip().lower()
+    table = table.strip().lower()
+
+    if schema not in _SCHEMA_ALLOWLIST:
+        raise ToolError(
+            f"Schema '{schema}' is not in the allowlist. "
+            f"Allowed schemas: {', '.join(sorted(_SCHEMA_ALLOWLIST))}."
+        )
+
+    conn = get_wrds_connection()
+
+    # Query column metadata from information_schema
+    logger.debug("Querying column metadata for %s.%s", schema, table)
+    df = conn.raw_sql(
+        """
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = :schema AND table_name = :table
+        ORDER BY ordinal_position
+        """,
+        params={"schema": schema, "table": table},
+    )
+
+    if df.empty:
+        raise ToolError(
+            f"Table '{schema}.{table}' not found or has no columns. "
+            "Check the schema and table name using get_data_catalog()."
+        )
+
+    # Merge with embedded column documentation
+    doc_key = f"{schema}.{table}"
+    col_docs = COLUMN_DOCS.get(doc_key, {})
+
+    columns = []
+    for _, row in df.iterrows():
+        col_name = row["column_name"]
+        columns.append({
+            "name": col_name,
+            "type": row["data_type"],
+            "nullable": row["is_nullable"] == "YES",
+            "description": col_docs.get(col_name),
+        })
+
+    # Approximate row count from pg_class (fast, no full table scan)
+    row_count = None
+    try:
+        rc_df = conn.raw_sql(
+            """
+            SELECT reltuples::bigint AS approx_rows
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = :schema AND c.relname = :table
+            """,
+            params={"schema": schema, "table": table},
+        )
+        if not rc_df.empty:
+            row_count = int(rc_df.iloc[0]["approx_rows"])
+    except Exception as e:
+        logger.debug("Could not get row count for %s.%s: %s", schema, table, e)
+
+    return {
+        "schema": schema,
+        "table": table,
+        "columns": columns,
+        "row_count": row_count,
+    }
+
+
+@catalog_mcp.tool
+def resolve_identifier(
+    ticker: Annotated[str, Field(description="Company ticker symbol")],
+    target: Annotated[str, Field(description="Target identifier type: 'gvkey', 'permno', 'issuer_id'")] = "gvkey",
+    ctx: Context = None,
+) -> dict:
+    """Resolve a ticker symbol to a WRDS identifier.
+
+    Supported target types:
+    - gvkey: Compustat Global Company Key (via comp.security)
+    - permno: CRSP Permanent Security Number (via crsp.stocknames_v2)
+    - issuer_id: FISD Issuer ID (via comp.security + fisd.fisd_mergedissue CUSIP linkage)
+
+    Example: resolve_identifier(ticker="AAPL", target="permno")
+    """
+    ticker = validate_ticker(ticker)
+    target = target.strip().lower()
+    valid_targets = {"gvkey", "permno", "issuer_id"}
+
+    if target not in valid_targets:
+        raise ToolError(
+            f"Invalid target '{target}'. Must be one of: {', '.join(sorted(valid_targets))}."
+        )
+
+    conn = get_wrds_connection()
+    logger.debug("Resolving ticker '%s' to %s", ticker, target)
+
+    if target == "gvkey":
+        value = resolve_ticker_to_gvkey(conn, ticker)
+        source_table = "comp.security"
+
+    elif target == "permno":
+        df = conn.raw_sql(
+            """
+            SELECT DISTINCT permno
+            FROM crsp.stocknames_v2
+            WHERE ticker = :ticker
+            ORDER BY permno
+            LIMIT 1
+            """,
+            params={"ticker": ticker},
+        )
+        value = int(df.iloc[0]["permno"]) if not df.empty else None
+        source_table = "crsp.stocknames_v2"
+
+    elif target == "issuer_id":
+        value = resolve_ticker_to_fisd_issuer(conn, ticker)
+        source_table = "comp.security + fisd.fisd_mergedissue"
+
+    if value is None:
+        raise ToolError(
+            f"Could not resolve ticker '{ticker}' to {target}. "
+            "The ticker may be invalid or not covered in the relevant dataset."
+        )
+
+    return {
+        "ticker": ticker,
+        "target_type": target,
+        "value": value,
+        "source_table": source_table,
+    }

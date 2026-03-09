@@ -10,19 +10,29 @@ MCP server providing Claude Code with natural language access to WRDS financial 
 
 ## Architecture
 
+Three-tier design: curated tools handle domain-specific logic, `query_wrds` provides guarded SQL access for ad-hoc analysis, and catalog tools enable schema discovery.
+
 ```
 src/wrds_mcp/
-├── server.py           # FastMCP entry point, mounts 6 sub-servers
-├── db/connection.py    # Singleton WRDS connection with retry (3 attempts, exponential backoff)
+├── server.py             # FastMCP entry point, mounts 7 sub-servers
+├── db/connection.py      # Singleton WRDS connection with retry (3 attempts, exponential backoff)
 └── tools/
-    ├── _validation.py  # Input validation + DataFrame-to-JSON conversion
-    ├── catalog.py      # Discovery tool — live data catalog with date ranges (1 tool)
-    ├── equity.py       # CRSP stock tools — price history, returns, summary (3 tools)
-    ├── bonds.py        # TRACE/FISD/bondret — transactions, prices, returns, covenants (6 tools)
-    ├── ratings.py      # Credit ratings from bondret + Compustat fallback (2 tools)
-    ├── financials.py   # Compustat leverage/coverage/liquidity + composites (5 tools)
-    └── loans.py        # DealScan syndicated loan terms + covenants (2 tools)
+    ├── _validation.py    # Input validation + DataFrame-to-JSON conversion
+    ├── _schema_docs.py   # Static column documentation (~95 WRDS mnemonics)
+    ├── catalog.py        # Tier 3: discovery — live catalog, schema introspection, ID resolution (3 tools)
+    ├── query.py          # Tier 2: guarded SQL — read-only SELECT with safety validation (1 tool)
+    ├── equity.py         # Tier 1: CRSP stock tools — price history, returns, summary (3 tools)
+    ├── bonds.py          # Tier 1: TRACE/FISD/bondret — transactions, prices, returns, covenants (6 tools)
+    ├── ratings.py        # Tier 1: Credit ratings from bondret + Compustat fallback (2 tools)
+    ├── financials.py     # Tier 1: Compustat leverage/coverage/liquidity + composites (6 tools)
+    └── loans.py          # Tier 1: DealScan syndicated loan terms + covenants (2 tools)
 ```
+
+### Three Tiers
+
+1. **Tier 1 — Curated Tools** (20 tools): Pre-built tools with domain logic (auto-routing, TTM calculations, multi-source resolution). Use these first.
+2. **Tier 2 — `query_wrds`** (1 tool): Guarded SQL escape hatch for any metric not covered by Tier 1. SELECT-only, schema-allowlisted, 10K row limit, 30s timeout.
+3. **Tier 3 — Discovery** (3 tools): `get_data_catalog` (what data exists), `get_table_schema` (column metadata + docs), `resolve_identifier` (ticker → gvkey/permno/issuer_id).
 
 **Pattern:** Each tool module creates its own `FastMCP` sub-server, mounted by `server.py`. Tools use `get_wrds_connection()` singleton — easy to mock in tests.
 
@@ -43,6 +53,7 @@ src/wrds_mcp/
 | `fisd.fisd_put_schedule` | Put provisions |
 | `fisd.fisd_sinking_fund` | Sinking fund provisions |
 | `comp.funda` | Annual financial fundamentals |
+| `comp.fundq` | Quarterly financial fundamentals (TTM calculations) |
 | `comp.adsprate` | S&P credit ratings (through Feb 2017 only — fallback) |
 | `comp.security` | Ticker-to-gvkey resolution |
 | `dealscan.facility` | Syndicated loan facility details |
@@ -55,11 +66,14 @@ src/wrds_mcp/
 
 ## Key Design Decisions
 
+- **Three-tier architecture:** Curated tools for complex domain logic → guarded SQL for ad-hoc queries → schema discovery for self-service exploration
 - **Auto-routing:** Bond price/yield tools auto-route between `trace_enhanced_clean` (historical, research quality) and `trace.trace` (recent, raw) based on whether end_date is within the last ~12 months
 - **144A fallback:** When standard TRACE tables return empty, bond tools automatically check `trace.trace_btds144a` for 144A private placements (e.g., PRKS/SeaWorld bonds)
-- **Discovery tool:** `get_data_catalog()` queries live date ranges so Claude knows what data exists and which tool to use
+- **Discovery tools:** `get_data_catalog()` queries live date ranges; `get_table_schema()` returns column metadata with human-readable docs; `resolve_identifier()` bridges ticker → WRDS IDs
+- **Guarded SQL:** `query_wrds` validates queries (SELECT-only, no mutation keywords, schema allowlist), enforces LIMIT 10K and 30s timeout, warns about missing Compustat filters
 - **Ratings primary source:** `wrdsapps_bondret.bondret` provides S&P + Moody's + Fitch through latest month; `comp.adsprate` is fallback only (ended Feb 2017)
 - **FISD ticker matching:** Uses issuer_id subquery pattern because many bonds have NULL ticker in fisd_mergedissue. Falls back to Compustat CUSIP linkage (5-char prefix match) when FISD has no ticker at all
+- **TTM EBITDA:** `get_quarterly_leverage` computes rolling 4-quarter sum from `comp.fundq` for accurate net leverage trending
 
 ## Conventions
 
@@ -70,18 +84,24 @@ src/wrds_mcp/
 - **Compustat filter:** always apply `indfmt='INDL' AND datafmt='STD' AND consol='C' AND curcd='USD'`
 - **Credentials:** env vars only (`WRDS_USERNAME`, `WRDS_PASSWORD`), never hardcoded
 - **Tests:** mock `get_wrds_connection` and `resolve_ticker_to_gvkey`, never hit real WRDS API
+- **Allowed schemas:** comp, crsp, trace, wrdsapps_bondret, fisd, dealscan
 
-## Tool Inventory (19 tools)
+## Tool Inventory (24 tools)
 
-### catalog.py
+### catalog.py (Tier 3 — Discovery)
 - `get_data_catalog(refresh=False)` — live catalog of all datasets with date ranges and tool routing
+- `get_table_schema(schema, table)` — column metadata with types, nullability, and human-readable descriptions
+- `resolve_identifier(ticker, target)` — resolve ticker to gvkey, permno, or issuer_id
 
-### equity.py
+### query.py (Tier 2 — Guarded SQL)
+- `query_wrds(sql, params=None)` — execute read-only SELECT against WRDS with safety validation
+
+### equity.py (Tier 1)
 - `get_stock_price_history(ticker, start_date, end_date, frequency="auto")` — CRSP daily/monthly prices
 - `get_stock_returns(ticker, start_date, end_date)` — compounded cumulative + annualized return
 - `get_stock_summary(ticker)` — latest price, 52-week range, market cap, YTD return
 
-### bonds.py
+### bonds.py (Tier 1)
 - `get_bond_price_history(ticker, start_date, end_date)` — daily VWAP price/yield per CUSIP (auto-routes TRACE sources)
 - `get_bond_transactions(ticker, start_date, end_date)` — individual TRACE trades
 - `get_bond_yield_history(cusip, start_date, end_date)` — yield time series for a specific bond
@@ -89,17 +109,18 @@ src/wrds_mcp/
 - `get_bond_returns(ticker, start_date, end_date)` — monthly return/yield/spread/duration from bondret
 - `get_bond_covenants(ticker)` — protective covenants, call/put schedules, sinking funds from FISD
 
-### ratings.py
+### ratings.py (Tier 1)
 - `get_credit_ratings(ticker)` — current S&P/Moody's/Fitch ratings (bondret primary, Compustat fallback)
 - `get_ratings_history(ticker, start_date, end_date)` — multi-agency rating changes over time
 
-### financials.py
+### financials.py (Tier 1)
 - `get_leverage_metrics(ticker, periods=5)` — debt/EBITDA, net debt/EBITDA
 - `get_coverage_ratios(ticker, periods=5)` — interest coverage, FCC
 - `get_liquidity_metrics(ticker, periods=5)` — current ratio, cash
+- `get_quarterly_leverage(ticker, quarters=12)` — quarterly debt/TTM EBITDA trending
 - `get_credit_summary(ticker)` — combined: leverage + coverage + ratings + bonds + covenants + loans
 - `get_company_overview(ticker)` — everything: stock performance + full credit profile
 
-### loans.py
+### loans.py (Tier 1)
 - `get_loan_terms(ticker)` — DealScan syndicated loan facility terms and pricing
 - `get_loan_covenants(ticker)` — financial and net worth covenants on syndicated loans
