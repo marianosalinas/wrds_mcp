@@ -429,35 +429,29 @@ class TestGetBondCovenants:
     @patch("wrds_mcp.tools.bonds.get_wrds_connection")
     def test_happy_path(self, mock_get_conn):
         bonds_df = pd.DataFrame({
+            "issue_id": [1001, 1002],
             "complete_cusip": ["037833AK6", "037833AL4"],
             "coupon": [2.25, 3.05],
             "maturity": pd.to_datetime(["2026-05-01", "2029-02-15"]),
             "issuer_id": [500, 500],
         })
         cov_df = pd.DataFrame({
-            "complete_cusip": ["037833AK6"],
-            "covenant_id": [1],
+            "issue_id": [1001],
             "cross_default": ["Y"],
             "cross_acceleration": ["N"],
             "change_control_put_provisions": ["Y"],
             "rating_decline_trigger_put": ["N"],
             "negative_pledge_covenant": ["Y"],
-            "subsidiary_guarantee": ["N"],
-            "liens_limitation": ["Y"],
-            "restricted_payments_limitation": ["Y"],
-            "consolidation_merger": ["Y"],
-            "sale_assets": ["Y"],
-            "senior_debt_issuance": ["N"],
-            "subordinated_debt_issuance": ["N"],
-            "stock_transfer_sale_disposal": ["N"],
+            "asset_sale_clause": ["Y"],
+            "after_acquired_property_clause": ["N"],
         })
         call_df = pd.DataFrame({
-            "complete_cusip": ["037833AK6"],
+            "issue_id": [1001],
             "call_date": pd.to_datetime(["2025-05-01"]),
             "call_price": [100.0],
         })
-        put_df = pd.DataFrame(columns=["complete_cusip", "put_date", "put_price"])
-        sink_df = pd.DataFrame(columns=["complete_cusip", "sinking_fund_date", "sinking_fund_price", "sinking_fund_amount"])
+        put_df = pd.DataFrame(columns=["issue_id", "put_date", "put_price"])
+        sink_df = pd.DataFrame(columns=["issue_id"])
 
         conn = MagicMock()
         conn.raw_sql.side_effect = [bonds_df, cov_df, call_df, put_df, sink_df]
@@ -519,6 +513,7 @@ class TestGetBondCovenants:
     @patch("wrds_mcp.tools.bonds.get_wrds_connection")
     def test_covenant_query_failure(self, mock_get_conn):
         bonds_df = pd.DataFrame({
+            "issue_id": [1001],
             "complete_cusip": ["037833AK6"],
             "coupon": [2.25],
             "maturity": pd.to_datetime(["2026-05-01"]),
@@ -542,25 +537,20 @@ class TestGetBondCovenants:
     @patch("wrds_mcp.tools.bonds.get_wrds_connection")
     def test_bond_with_sinking_fund(self, mock_get_conn):
         bonds_df = pd.DataFrame({
+            "issue_id": [1001],
             "complete_cusip": ["037833AK6"],
             "coupon": [2.25],
             "maturity": pd.to_datetime(["2026-05-01"]),
             "issuer_id": [500],
         })
-        cov_df = pd.DataFrame(columns=["complete_cusip", "covenant_id", "cross_default",
+        cov_df = pd.DataFrame(columns=["issue_id", "cross_default",
             "cross_acceleration", "change_control_put_provisions",
             "rating_decline_trigger_put", "negative_pledge_covenant",
-            "subsidiary_guarantee", "liens_limitation",
-            "restricted_payments_limitation", "consolidation_merger",
-            "sale_assets", "senior_debt_issuance", "subordinated_debt_issuance",
-            "stock_transfer_sale_disposal"])
-        call_df = pd.DataFrame(columns=["complete_cusip", "call_date", "call_price"])
-        put_df = pd.DataFrame(columns=["complete_cusip", "put_date", "put_price"])
+            "asset_sale_clause", "after_acquired_property_clause"])
+        call_df = pd.DataFrame(columns=["issue_id", "call_date", "call_price"])
+        put_df = pd.DataFrame(columns=["issue_id", "put_date", "put_price"])
         sink_df = pd.DataFrame({
-            "complete_cusip": ["037833AK6"],
-            "sinking_fund_date": pd.to_datetime(["2025-11-01"]),
-            "sinking_fund_price": [100.0],
-            "sinking_fund_amount": [500000.0],
+            "issue_id": [1001],
         })
 
         conn = MagicMock()

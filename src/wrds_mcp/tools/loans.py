@@ -39,25 +39,25 @@ def get_loan_terms(
     # Search by ticker in the company table
     query = """
         SELECT f.facilityid AS facility_id,
-               f.facilitytypedesc AS facility_type,
+               f.loantype AS facility_type,
                f.facilityamt AS facility_amt,
                f.facilitystartdate AS facility_start_date,
                f.facilityenddate AS facility_end_date,
                f.currency,
+               f.seniority,
+               f.secured,
                p.dealactivedate AS deal_active_date,
-               b.borrowercompanyid,
-               b.borrowername AS borrower_name,
-               cfp.allindrawnspread AS spread,
+               p.borrowercompanyid,
+               c.company AS borrower_name,
+               cfp.allindrawn AS spread,
                cfp.baserate AS base_rate
         FROM dealscan.facility f
         INNER JOIN dealscan.package p
             ON f.packageid = p.packageid
-        INNER JOIN dealscan.borrower b
-            ON p.packageid = b.packageid
         LEFT JOIN dealscan.currfacpricing cfp
             ON f.facilityid = cfp.facilityid
         INNER JOIN dealscan.company c
-            ON b.borrowercompanyid = c.companyid
+            ON p.borrowercompanyid = c.companyid
         WHERE UPPER(c.ticker) = :ticker
         ORDER BY p.dealactivedate DESC, f.facilityid
     """
@@ -102,42 +102,33 @@ def get_loan_covenants(
 
     # Financial covenants
     fin_query = """
-        SELECT f.facilityid AS facility_id,
-               f.facilitytypedesc AS facility_type,
+        SELECT fc.packageid,
                fc.covenanttype AS covenant_type,
                fc.initialratio AS initial_ratio,
+               fc.initialamt AS initial_amount,
                p.dealactivedate AS deal_active_date
         FROM dealscan.financialcovenant fc
-        INNER JOIN dealscan.facility f
-            ON fc.facilityid = f.facilityid
         INNER JOIN dealscan.package p
-            ON f.packageid = p.packageid
-        INNER JOIN dealscan.borrower b
-            ON p.packageid = b.packageid
+            ON fc.packageid = p.packageid
         INNER JOIN dealscan.company c
-            ON b.borrowercompanyid = c.companyid
+            ON p.borrowercompanyid = c.companyid
         WHERE UPPER(c.ticker) = :ticker
-        ORDER BY p.dealactivedate DESC, f.facilityid
+        ORDER BY p.dealactivedate DESC
     """
 
     # Net worth covenants
     nw_query = """
-        SELECT f.facilityid AS facility_id,
-               f.facilitytypedesc AS facility_type,
-               nwc.nwtype AS covenant_type,
-               nwc.nwinitialamt AS initial_amount,
+        SELECT nwc.packageid,
+               nwc.covenanttype AS covenant_type,
+               nwc.baseamt AS initial_amount,
                p.dealactivedate AS deal_active_date
         FROM dealscan.networthcovenant nwc
-        INNER JOIN dealscan.facility f
-            ON nwc.facilityid = f.facilityid
         INNER JOIN dealscan.package p
-            ON f.packageid = p.packageid
-        INNER JOIN dealscan.borrower b
-            ON p.packageid = b.packageid
+            ON nwc.packageid = p.packageid
         INNER JOIN dealscan.company c
-            ON b.borrowercompanyid = c.companyid
+            ON p.borrowercompanyid = c.companyid
         WHERE UPPER(c.ticker) = :ticker
-        ORDER BY p.dealactivedate DESC, f.facilityid
+        ORDER BY p.dealactivedate DESC
     """
 
     logger.debug("get_loan_covenants: ticker=%s", ticker)
@@ -160,20 +151,20 @@ def get_loan_covenants(
 
     if not fin_df.empty:
         for _, row in fin_df.iterrows():
-            results.append({
-                "facility_id": int(row["facility_id"]) if pd.notna(row.get("facility_id")) else None,
-                "facility_type": row.get("facility_type"),
+            entry = {
                 "covenant_category": "financial",
                 "covenant_type": row.get("covenant_type"),
-                "initial_ratio": float(row["initial_ratio"]) if pd.notna(row.get("initial_ratio")) else None,
                 "deal_active_date": row["deal_active_date"].isoformat()[:10] if hasattr(row["deal_active_date"], "isoformat") else str(row["deal_active_date"]),
-            })
+            }
+            if pd.notna(row.get("initial_ratio")):
+                entry["initial_ratio"] = float(row["initial_ratio"])
+            if pd.notna(row.get("initial_amount")):
+                entry["initial_amount"] = float(row["initial_amount"])
+            results.append(entry)
 
     if not nw_df.empty:
         for _, row in nw_df.iterrows():
             results.append({
-                "facility_id": int(row["facility_id"]) if pd.notna(row.get("facility_id")) else None,
-                "facility_type": row.get("facility_type"),
                 "covenant_category": "net_worth",
                 "covenant_type": row.get("covenant_type"),
                 "initial_amount": float(row["initial_amount"]) if pd.notna(row.get("initial_amount")) else None,

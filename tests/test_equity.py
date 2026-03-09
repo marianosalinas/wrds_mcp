@@ -262,7 +262,7 @@ class TestGetStockSummary:
             "ticker": ["F"] * 5,
             "date": dates,
             "price": [11.0, 14.0, 12.0, 12.50, 13.00],
-            "market_cap": [44e9, 56e9, 48e9, 50e9, 52e9],
+            "market_cap": [44e6, 56e6, 48e6, 50e6, 52e6],
             "volume": [50e6, 60e6, 55e6, 45e6, 48e6],
         })
         conn = MagicMock()
@@ -290,7 +290,7 @@ class TestGetStockSummary:
             "ticker": ["F"] * 3,
             "date": dates,
             "price": [10.0, 10.5, 12.0],
-            "market_cap": [40e9, 42e9, 48e9],
+            "market_cap": [40e6, 42e6, 48e6],
             "volume": [50e6, 55e6, 45e6],
         })
         conn = MagicMock()
@@ -346,7 +346,7 @@ class TestGetStockSummary:
             "ticker": ["F"],
             "date": dates,
             "price": [13.00],
-            "market_cap": [52.1e9],
+            "market_cap": [52.1e6],
             "volume": [48e6],
         })
         conn = MagicMock()
@@ -364,7 +364,7 @@ class TestGetStockSummary:
             "ticker": ["F"],
             "date": dates,
             "price": [float("nan")],
-            "market_cap": [52e9],
+            "market_cap": [52e6],
             "volume": [48e6],
         })
         conn = MagicMock()

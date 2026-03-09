@@ -137,10 +137,10 @@ class TestGetLoanCovenants:
     @patch("wrds_mcp.tools.loans.get_wrds_connection")
     def test_happy_path_financial_covenants(self, mock_get_conn):
         fin_df = pd.DataFrame({
-            "facility_id": [10001, 10001],
-            "facility_type": ["Term Loan", "Term Loan"],
+            "packageid": [100, 100],
             "covenant_type": ["Max Debt/EBITDA", "Min Interest Coverage"],
             "initial_ratio": [4.5, 2.0],
+            "initial_amount": [float("nan"), float("nan")],
             "deal_active_date": pd.to_datetime(["2023-03-15", "2023-03-15"]),
         })
         nw_df = pd.DataFrame()  # No net worth covenants
@@ -160,8 +160,7 @@ class TestGetLoanCovenants:
     def test_happy_path_net_worth_covenants(self, mock_get_conn):
         fin_df = pd.DataFrame()
         nw_df = pd.DataFrame({
-            "facility_id": [10001],
-            "facility_type": ["Term Loan"],
+            "packageid": [100],
             "covenant_type": ["Min Net Worth"],
             "initial_amount": [1000000000.0],
             "deal_active_date": pd.to_datetime(["2023-03-15"]),
@@ -179,15 +178,14 @@ class TestGetLoanCovenants:
     @patch("wrds_mcp.tools.loans.get_wrds_connection")
     def test_both_covenant_types(self, mock_get_conn):
         fin_df = pd.DataFrame({
-            "facility_id": [10001],
-            "facility_type": ["Term Loan"],
+            "packageid": [100],
             "covenant_type": ["Max Debt/EBITDA"],
             "initial_ratio": [4.5],
+            "initial_amount": [float("nan")],
             "deal_active_date": pd.to_datetime(["2023-03-15"]),
         })
         nw_df = pd.DataFrame({
-            "facility_id": [10001],
-            "facility_type": ["Term Loan"],
+            "packageid": [100],
             "covenant_type": ["Min Net Worth"],
             "initial_amount": [1e9],
             "deal_active_date": pd.to_datetime(["2023-03-15"]),
@@ -242,10 +240,10 @@ class TestGetLoanCovenants:
     @patch("wrds_mcp.tools.loans.get_wrds_connection")
     def test_null_initial_ratio_handled(self, mock_get_conn):
         fin_df = pd.DataFrame({
-            "facility_id": [10001],
-            "facility_type": ["Term Loan"],
+            "packageid": [100],
             "covenant_type": ["Max Debt/EBITDA"],
             "initial_ratio": [float("nan")],
+            "initial_amount": [float("nan")],
             "deal_active_date": pd.to_datetime(["2023-03-15"]),
         })
         nw_df = pd.DataFrame()
@@ -255,4 +253,4 @@ class TestGetLoanCovenants:
 
         result = get_loan_covenants("F")
 
-        assert result[0]["initial_ratio"] is None
+        assert "initial_ratio" not in result[0]  # NaN ratios are omitted

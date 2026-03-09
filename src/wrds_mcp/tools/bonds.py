@@ -570,9 +570,9 @@ def get_bond_covenants(
     conn = get_wrds_connection()
     issuer_fb = _resolve_issuer_fallback(conn, ticker)
 
-    # First get the company's bond CUSIPs via the issuer_id pattern
+    # First get the company's bond CUSIPs and issue_ids
     cusip_query = f"""
-        SELECT fi.complete_cusip, fi.coupon, fi.maturity, fi.issuer_id
+        SELECT fi.issue_id, fi.complete_cusip, fi.coupon, fi.maturity, fi.issuer_id
         FROM fisd.fisd_mergedissue fi
         WHERE {_issuer_ticker_filter('fi')}
           AND fi.asset_backed = 'N'
@@ -595,57 +595,52 @@ def get_bond_covenants(
     if not issuer_ids:
         return {"ticker": ticker, "message": "No issuer found.", "bonds": []}
 
-    # Use first issuer_id for covenant queries (they're at issuer level in FISD)
-    issuer_id = issuer_ids[0]
+    # Get issue_ids for covenant lookups
+    issue_ids = bonds_df["issue_id"].dropna().astype(int).unique().tolist()
+    if not issue_ids:
+        return {"ticker": ticker, "message": "No issue IDs found.", "bonds": []}
 
-    # Bondholder protective covenants
+    # Bondholder protective covenants (keyed by issue_id)
     cov_query = """
-        SELECT complete_cusip, covenant_id,
+        SELECT issue_id,
                cross_default, cross_acceleration,
                change_control_put_provisions,
                rating_decline_trigger_put,
                negative_pledge_covenant,
-               subsidiary_guarantee,
-               liens_limitation,
-               restricted_payments_limitation,
-               consolidation_merger,
-               sale_assets,
-               senior_debt_issuance,
-               subordinated_debt_issuance,
-               stock_transfer_sale_disposal
+               after_acquired_property_clause,
+               asset_sale_clause
         FROM fisd.fisd_bondholder_protective
-        WHERE issuer_id = :issuer_id
+        WHERE issue_id = ANY(:issue_ids)
     """
 
     # Call schedule
     call_query = """
-        SELECT complete_cusip, call_date, call_price
+        SELECT issue_id, call_date, call_price
         FROM fisd.fisd_call_schedule
-        WHERE issuer_id = :issuer_id
-        ORDER BY complete_cusip, call_date
+        WHERE issue_id = ANY(:issue_ids)
+        ORDER BY issue_id, call_date
     """
 
     # Put schedule
     put_query = """
-        SELECT complete_cusip, put_date, put_price
+        SELECT issue_id, put_date, put_price
         FROM fisd.fisd_put_schedule
-        WHERE issuer_id = :issuer_id
-        ORDER BY complete_cusip, put_date
+        WHERE issue_id = ANY(:issue_ids)
+        ORDER BY issue_id, put_date
     """
 
     # Sinking fund
     sink_query = """
-        SELECT complete_cusip, sinking_fund_date, sinking_fund_price, sinking_fund_amount
+        SELECT issue_id
         FROM fisd.fisd_sinking_fund
-        WHERE issuer_id = :issuer_id
-        ORDER BY complete_cusip, sinking_fund_date
+        WHERE issue_id = ANY(:issue_ids)
     """
 
     try:
-        cov_df = conn.raw_sql(cov_query, params={"issuer_id": issuer_id})
-        call_df = conn.raw_sql(call_query, params={"issuer_id": issuer_id}, date_cols=["call_date"])
-        put_df = conn.raw_sql(put_query, params={"issuer_id": issuer_id}, date_cols=["put_date"])
-        sink_df = conn.raw_sql(sink_query, params={"issuer_id": issuer_id}, date_cols=["sinking_fund_date"])
+        cov_df = conn.raw_sql(cov_query, params={"issue_ids": issue_ids})
+        call_df = conn.raw_sql(call_query, params={"issue_ids": issue_ids}, date_cols=["call_date"])
+        put_df = conn.raw_sql(put_query, params={"issue_ids": issue_ids}, date_cols=["put_date"])
+        sink_df = conn.raw_sql(sink_query, params={"issue_ids": issue_ids})
     except Exception as e:
         raise ToolError(f"WRDS covenant query failed: {e}")
 
@@ -653,6 +648,7 @@ def get_bond_covenants(
     bond_results = []
     for _, bond in bonds_df.iterrows():
         cusip = bond["complete_cusip"]
+        issue_id = int(bond["issue_id"]) if pd.notna(bond.get("issue_id")) else None
         coupon = float(bond["coupon"]) if pd.notna(bond.get("coupon")) else None
         maturity = bond["maturity"].isoformat()[:10] if hasattr(bond["maturity"], "isoformat") else str(bond["maturity"])
 
@@ -663,7 +659,7 @@ def get_bond_covenants(
         }
 
         # Protective covenants
-        bond_covs = cov_df[cov_df["complete_cusip"] == cusip]
+        bond_covs = cov_df[cov_df["issue_id"] == issue_id] if issue_id else pd.DataFrame()
         if not bond_covs.empty:
             row = bond_covs.iloc[0]
             entry["covenants"] = {
@@ -672,31 +668,28 @@ def get_bond_covenants(
                 "change_of_control_put": row.get("change_control_put_provisions"),
                 "rating_decline_put": row.get("rating_decline_trigger_put"),
                 "negative_pledge": row.get("negative_pledge_covenant"),
-                "subsidiary_guarantee": row.get("subsidiary_guarantee"),
-                "liens_limitation": row.get("liens_limitation"),
-                "restricted_payments": row.get("restricted_payments_limitation"),
-                "merger_restriction": row.get("consolidation_merger"),
-                "asset_sale_restriction": row.get("sale_assets"),
+                "asset_sale_clause": row.get("asset_sale_clause"),
+                "after_acquired_property": row.get("after_acquired_property_clause"),
             }
         else:
             entry["covenants"] = None
 
         # Call schedule
-        bond_calls = call_df[call_df["complete_cusip"] == cusip]
+        bond_calls = call_df[call_df["issue_id"] == issue_id] if issue_id else pd.DataFrame()
         if not bond_calls.empty:
             entry["call_schedule"] = df_to_records(bond_calls[["call_date", "call_price"]])
         else:
             entry["call_schedule"] = []
 
         # Put schedule
-        bond_puts = put_df[put_df["complete_cusip"] == cusip]
+        bond_puts = put_df[put_df["issue_id"] == issue_id] if issue_id else pd.DataFrame()
         if not bond_puts.empty:
             entry["put_schedule"] = df_to_records(bond_puts[["put_date", "put_price"]])
         else:
             entry["put_schedule"] = []
 
         # Sinking fund
-        bond_sink = sink_df[sink_df["complete_cusip"] == cusip]
+        bond_sink = sink_df[sink_df["issue_id"] == issue_id] if issue_id else pd.DataFrame()
         entry["has_sinking_fund"] = not bond_sink.empty
 
         bond_results.append(entry)

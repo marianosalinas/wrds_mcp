@@ -2,7 +2,7 @@
 
 import math
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 from fastmcp.exceptions import ToolError
@@ -94,7 +94,7 @@ def df_to_records(df: pd.DataFrame, max_rows: int = MAX_ROWS) -> list[dict]:
         for col, val in row.items():
             if pd.isna(val):
                 record[col] = None
-            elif isinstance(val, pd.Timestamp):
+            elif isinstance(val, (pd.Timestamp, date, datetime)):
                 record[col] = val.isoformat()[:10]
             elif isinstance(val, float) and (math.isinf(val) or math.isnan(val)):
                 record[col] = None
