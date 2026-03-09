@@ -14,6 +14,8 @@ from wrds_mcp.tools.screening import (
     _build_sic_filter,
     _detect_latest_full_month,
     _validate_rating,
+    get_market_benchmarks,
+    get_relative_value,
     screen_bonds,
     screen_issuers,
 )
@@ -706,3 +708,266 @@ class TestScreenBonds:
         query = conn.raw_sql.call_args_list[1][0][0]
         assert "asset_backed = 'N'" in query
         assert "convertible = 'N'" in query
+
+
+# --- get_market_benchmarks tests ---
+
+def _make_benchmark_df(**overrides):
+    defaults = {
+        "date": pd.to_datetime(["2025-01-31", "2025-02-28"]),
+        "bond_count": [5000, 5100],
+        "issuer_count": [600, 610],
+        "avg_spread": [180.5, 175.3],
+        "avg_yield": [5.5, 5.4],
+        "avg_return": [0.008, 0.005],
+        "avg_duration": [4.5, 4.4],
+        "avg_price": [95.0, 95.5],
+        "total_outstanding": [500000.0, 510000.0],
+        "vw_spread": [190.2, 185.1],
+        "vw_yield": [5.6, 5.5],
+        "vw_return": [0.007, 0.004],
+    }
+    defaults.update(overrides)
+    return pd.DataFrame(defaults)
+
+
+class TestGetMarketBenchmarks:
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_happy_path(self, mock_get_conn):
+        conn = MagicMock()
+        conn.raw_sql.return_value = _make_benchmark_df()
+        mock_get_conn.return_value = conn
+
+        result = get_market_benchmarks("2025-01-01", "2025-03-31")
+
+        assert result["months"] == 2
+        assert result["period"]["start"] == "2025-01-01"
+        assert result["period"]["end"] == "2025-03-31"
+        assert len(result["monthly_data"]) == 2
+        assert "cumulative_vw_return" in result["summary"]
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_rating_class_filter(self, mock_get_conn):
+        conn = MagicMock()
+        conn.raw_sql.return_value = _make_benchmark_df()
+        mock_get_conn.return_value = conn
+
+        result = get_market_benchmarks("2025-01-01", "2025-03-31", rating_class="HY")
+
+        assert result["filters_applied"]["rating_class"] == "HY"
+        params = conn.raw_sql.call_args[1]["params"]
+        assert params["rating_class"] == "1.HY"
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_rating_category_filter(self, mock_get_conn):
+        conn = MagicMock()
+        conn.raw_sql.return_value = _make_benchmark_df()
+        mock_get_conn.return_value = conn
+
+        result = get_market_benchmarks("2025-01-01", "2025-03-31", rating_category="BB")
+
+        assert result["filters_applied"]["rating_category"] == "BB"
+        params = conn.raw_sql.call_args[1]["params"]
+        assert params["rating_cat"] == "BB"
+
+    def test_invalid_rating_class(self):
+        with pytest.raises(ToolError, match="rating_class must be"):
+            get_market_benchmarks("2025-01-01", "2025-03-31", rating_class="XX")
+
+    def test_invalid_rating_category(self):
+        with pytest.raises(ToolError, match="Invalid rating_category"):
+            get_market_benchmarks("2025-01-01", "2025-03-31", rating_category="XYZ")
+
+    def test_invalid_date(self):
+        with pytest.raises(ToolError, match="Expected format"):
+            get_market_benchmarks("01-01-2025", "2025-03-31")
+
+    def test_date_range_inverted(self):
+        with pytest.raises(ToolError, match="must be before"):
+            get_market_benchmarks("2025-06-30", "2025-01-01")
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_empty_results(self, mock_get_conn):
+        conn = MagicMock()
+        conn.raw_sql.return_value = pd.DataFrame()
+        mock_get_conn.return_value = conn
+
+        result = get_market_benchmarks("2030-01-01", "2030-12-31")
+
+        assert "message" in result["monthly_data"][0]
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_query_failure(self, mock_get_conn):
+        conn = MagicMock()
+        conn.raw_sql.side_effect = Exception("timeout")
+        mock_get_conn.return_value = conn
+
+        with pytest.raises(ToolError, match="Benchmark query failed"):
+            get_market_benchmarks("2025-01-01", "2025-03-31")
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_cumulative_return_compounding(self, mock_get_conn):
+        conn = MagicMock()
+        df = _make_benchmark_df(vw_return=[0.01, 0.02])
+        conn.raw_sql.return_value = df
+        mock_get_conn.return_value = conn
+
+        result = get_market_benchmarks("2025-01-01", "2025-03-31")
+
+        # (1.01)(1.02) - 1 = 0.0302
+        last = result["monthly_data"][-1]
+        assert abs(last["cumulative_vw_return"] - 0.0302) < 0.001
+
+
+# --- get_relative_value tests ---
+
+def _make_issuer_bonds_df():
+    return pd.DataFrame({
+        "cusip": ["345370CX5", "345370CY3"],
+        "ticker": ["F", "F"],
+        "coupon": [4.346, 6.625],
+        "maturity": ["2026-12-08", "2028-02-15"],
+        "security_level": ["SU", "SU"],
+        "amount_outstanding": [1250.0, 800.0],
+        "sp_rating": ["BB+", "BB+"],
+        "moody_rating": ["Ba1", "Ba1"],
+        "rating_cat": ["BB", "BB"],
+        "rating_class": ["1.HY", "1.HY"],
+        "spread_bps": [200.0, 250.0],
+        "yield": [5.8, 6.3],
+        "price": [98.5, 97.2],
+        "duration": [2.35, 3.10],
+        "return_1mo": [0.008, 0.005],
+    })
+
+
+def _make_peer_stats_df():
+    return pd.DataFrame({
+        "rating_cat": ["BB"],
+        "bond_count": [500],
+        "issuer_count": [80],
+        "avg_spread": [180.0],
+        "spread_p25": [140.0],
+        "spread_median": [175.0],
+        "spread_p75": [220.0],
+        "avg_yield": [5.5],
+        "avg_duration": [4.0],
+        "avg_price": [96.0],
+        "avg_return_1mo": [0.006],
+    })
+
+
+class TestGetRelativeValue:
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_happy_path(self, mock_get_conn):
+        latest_month_df = pd.DataFrame({"date": ["2025-03-31"], "n": [800]})
+        conn = MagicMock()
+        conn.raw_sql.side_effect = [
+            latest_month_df,
+            _make_issuer_bonds_df(),
+            _make_peer_stats_df(),
+        ]
+        mock_get_conn.return_value = conn
+
+        result = get_relative_value("F")
+
+        assert result["ticker"] == "F"
+        assert result["bond_count"] == 2
+        assert result["as_of_date"] == "2025-03-31"
+        assert "peer_stats" in result
+        assert "BB" in result["peer_stats"]
+        # First bond: 200 - 180 = 20, so "fair" (not > 20)
+        assert result["bonds"][0]["spread_vs_peers"] == 20.0
+        # Second bond: 250 - 180 = 70, so "cheap"
+        assert result["bonds"][1]["spread_vs_peers"] == 70.0
+        assert result["bonds"][1]["relative_value"] == "cheap"
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_rich_bond(self, mock_get_conn):
+        latest_month_df = pd.DataFrame({"date": ["2025-03-31"], "n": [800]})
+        issuer_df = pd.DataFrame({
+            "cusip": ["345370CX5"],
+            "ticker": ["F"],
+            "coupon": [4.346],
+            "maturity": ["2026-12-08"],
+            "security_level": ["SU"],
+            "amount_outstanding": [1250.0],
+            "sp_rating": ["BB+"],
+            "moody_rating": ["Ba1"],
+            "rating_cat": ["BB"],
+            "rating_class": ["1.HY"],
+            "spread_bps": [140.0],  # Tight spread
+            "yield": [5.0],
+            "price": [100.5],
+            "duration": [2.35],
+            "return_1mo": [0.008],
+        })
+        conn = MagicMock()
+        conn.raw_sql.side_effect = [latest_month_df, issuer_df, _make_peer_stats_df()]
+        mock_get_conn.return_value = conn
+
+        result = get_relative_value("F")
+
+        # 140 - 180 = -40, so "rich"
+        assert result["bonds"][0]["spread_vs_peers"] == -40.0
+        assert result["bonds"][0]["relative_value"] == "rich"
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_empty_issuer(self, mock_get_conn):
+        latest_month_df = pd.DataFrame({"date": ["2025-03-31"], "n": [800]})
+        conn = MagicMock()
+        conn.raw_sql.side_effect = [latest_month_df, pd.DataFrame()]
+        mock_get_conn.return_value = conn
+
+        result = get_relative_value("ZZZZ")
+
+        assert "message" in result
+        assert "No bonds found" in result["message"]
+
+    def test_invalid_ticker(self):
+        with pytest.raises(ToolError, match="Invalid ticker"):
+            get_relative_value("F@#$")
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_query_failure(self, mock_get_conn):
+        latest_month_df = pd.DataFrame({"date": ["2025-03-31"], "n": [800]})
+        conn = MagicMock()
+        conn.raw_sql.side_effect = [latest_month_df, Exception("timeout")]
+        mock_get_conn.return_value = conn
+
+        with pytest.raises(ToolError, match="Issuer query failed"):
+            get_relative_value("F")
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_yield_vs_peers(self, mock_get_conn):
+        latest_month_df = pd.DataFrame({"date": ["2025-03-31"], "n": [800]})
+        conn = MagicMock()
+        conn.raw_sql.side_effect = [
+            latest_month_df,
+            _make_issuer_bonds_df(),
+            _make_peer_stats_df(),
+        ]
+        mock_get_conn.return_value = conn
+
+        result = get_relative_value("F")
+
+        # First bond yield 5.8, peer avg 5.5 => +0.3
+        assert result["bonds"][0]["yield_vs_peers"] == 0.3
+
+    @patch("wrds_mcp.tools.screening.get_wrds_connection")
+    def test_peer_stats_exclude_issuer(self, mock_get_conn):
+        """Peer stats query should exclude the issuer itself."""
+        latest_month_df = pd.DataFrame({"date": ["2025-03-31"], "n": [800]})
+        conn = MagicMock()
+        conn.raw_sql.side_effect = [
+            latest_month_df,
+            _make_issuer_bonds_df(),
+            _make_peer_stats_df(),
+        ]
+        mock_get_conn.return_value = conn
+
+        get_relative_value("F")
+
+        # The peer stats query (3rd call, index 2) should have ticker exclusion
+        peer_query = conn.raw_sql.call_args_list[2][0][0]
+        assert "!= :ticker" in peer_query

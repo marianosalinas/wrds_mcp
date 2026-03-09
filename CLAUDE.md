@@ -14,7 +14,7 @@ Three-tier design: curated tools handle domain-specific logic, `query_wrds` prov
 
 ```
 src/wrds_mcp/
-├── server.py             # FastMCP entry point, mounts 7 sub-servers
+├── server.py             # FastMCP entry point, mounts 9 sub-servers
 ├── db/connection.py      # Singleton WRDS connection with retry (3 attempts, exponential backoff)
 └── tools/
     ├── _validation.py    # Input validation + DataFrame-to-JSON conversion
@@ -25,12 +25,14 @@ src/wrds_mcp/
     ├── bonds.py          # Tier 1: TRACE/FISD/bondret — transactions, prices, returns, covenants (6 tools)
     ├── ratings.py        # Tier 1: Credit ratings from bondret + Compustat fallback (2 tools)
     ├── financials.py     # Tier 1: Compustat leverage/coverage/liquidity + composites (6 tools)
-    └── loans.py          # Tier 1: DealScan syndicated loan terms + covenants (2 tools)
+    ├── loans.py          # Tier 1: DealScan syndicated loan terms + covenants (2 tools)
+    ├── screening.py      # Tier 1: Issuer/bond screening, benchmarks, relative value (4 tools)
+    └── comps.py          # Tier 1: Side-by-side comps table (1 tool)
 ```
 
 ### Three Tiers
 
-1. **Tier 1 — Curated Tools** (20 tools): Pre-built tools with domain logic (auto-routing, TTM calculations, multi-source resolution). Use these first.
+1. **Tier 1 — Curated Tools** (25 tools): Pre-built tools with domain logic (auto-routing, TTM calculations, multi-source resolution). Use these first.
 2. **Tier 2 — `query_wrds`** (1 tool): Guarded SQL escape hatch for any metric not covered by Tier 1. SELECT-only, schema-allowlisted, 10K row limit, 30s timeout.
 3. **Tier 3 — Discovery** (3 tools): `get_data_catalog` (what data exists), `get_table_schema` (column metadata + docs), `resolve_identifier` (ticker → gvkey/permno/issuer_id).
 
@@ -86,7 +88,7 @@ src/wrds_mcp/
 - **Tests:** mock `get_wrds_connection` and `resolve_ticker_to_gvkey`, never hit real WRDS API
 - **Allowed schemas:** comp, crsp, trace, wrdsapps_bondret, fisd, dealscan
 
-## Tool Inventory (24 tools)
+## Tool Inventory (29 tools)
 
 ### catalog.py (Tier 3 — Discovery)
 - `get_data_catalog(refresh=False)` — live catalog of all datasets with date ranges and tool routing
@@ -124,3 +126,12 @@ src/wrds_mcp/
 ### loans.py (Tier 1)
 - `get_loan_terms(ticker)` — DealScan syndicated loan facility terms and pricing
 - `get_loan_covenants(ticker)` — financial and net worth covenants on syndicated loans
+
+### screening.py (Tier 1)
+- `screen_issuers(rating_class, min_rating, max_rating, sector, min_market_cap, ...)` — find issuers by credit, financial, and sector criteria
+- `screen_bonds(ticker, rating_class, security_level, min_amount_outstanding, ...)` — find bonds by rating, spread, coupon, maturity, sector
+- `get_market_benchmarks(start_date, end_date, rating_class, rating_category)` — monthly index-style returns (EW + VW spread, yield, return) for IG/HY/rating buckets
+- `get_relative_value(ticker)` — compare issuer's bonds vs rating-peer averages (spread, yield, percentiles, cheap/rich/fair)
+
+### comps.py (Tier 1)
+- `get_comps_table(tickers)` — side-by-side credit comps: ratings, leverage, coverage, market cap, bond stats, equity returns for up to 20 tickers

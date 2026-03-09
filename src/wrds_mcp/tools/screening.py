@@ -9,7 +9,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from wrds_mcp.db.connection import get_wrds_connection
-from wrds_mcp.tools._validation import df_to_records, validate_date, validate_ticker
+from wrds_mcp.tools._validation import df_to_records, validate_date, validate_date_range, validate_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -568,4 +568,261 @@ def screen_bonds(
         "filters_applied": filters_applied,
         "result_count": len(records),
         "bonds": records,
+    }
+
+
+# --- Tool 3: get_market_benchmarks ---
+
+@screening_mcp.tool
+def get_market_benchmarks(
+    start_date: Annotated[str, Field(description="Start date YYYY-MM-DD")],
+    end_date: Annotated[str, Field(description="End date YYYY-MM-DD")],
+    rating_class: Annotated[str | None, Field(description="'HY' or 'IG' (default: both)")] = None,
+    rating_category: Annotated[str | None, Field(description="Specific rating bucket: 'AAA','AA','A','BBB','BB','B','CCC'")] = None,
+    ctx: Context = None,
+) -> dict:
+    """Get aggregate bond market benchmarks over time — monthly index-style returns.
+
+    Computes equal-weighted and value-weighted average spread, yield, return,
+    and duration for the bond universe, broken down by month. Can be filtered
+    to IG, HY, or a specific rating category.
+
+    Useful for comparing an issuer's spread/return vs the market.
+
+    Returns: dict with filters, monthly_data (list of monthly aggregates),
+    and summary (period totals).
+
+    Example: get_market_benchmarks("2024-01-01", "2025-03-31", rating_class="HY")
+    """
+    start_date, end_date = validate_date_range(start_date, end_date)
+
+    # Validate before connecting
+    params: dict = {"start_date": start_date, "end_date": end_date}
+    filters: list[str] = []
+    filters_applied: dict = {}
+
+    if rating_class is not None:
+        rc = rating_class.strip().upper()
+        if rc not in ("HY", "IG"):
+            raise ToolError("rating_class must be 'HY' or 'IG'.")
+        params["rating_class"] = f"{'1' if rc == 'HY' else '0'}.{rc}"
+        filters.append("rating_class = :rating_class")
+        filters_applied["rating_class"] = rc
+
+    if rating_category is not None:
+        cat = rating_category.strip().upper()
+        valid_cats = ["AAA", "AA", "A", "BBB", "BB", "B", "CCC", "CC", "C", "D"]
+        if cat not in valid_cats:
+            raise ToolError(f"Invalid rating_category '{cat}'. Valid: {', '.join(valid_cats)}")
+        params["rating_cat"] = cat
+        filters.append("rating_cat = :rating_cat")
+        filters_applied["rating_category"] = cat
+
+    conn = get_wrds_connection()
+
+    where_extra = (" AND " + " AND ".join(filters)) if filters else ""
+
+    query = f"""
+        SELECT
+            date,
+            COUNT(*) AS bond_count,
+            COUNT(DISTINCT company_symbol) AS issuer_count,
+            ROUND(AVG(t_spread)::numeric, 1) AS avg_spread,
+            ROUND(AVG(yield)::numeric, 3) AS avg_yield,
+            ROUND(AVG(ret_eom)::numeric, 6) AS avg_return,
+            ROUND(AVG(duration)::numeric, 2) AS avg_duration,
+            ROUND(AVG(price_eom)::numeric, 2) AS avg_price,
+            ROUND(SUM(amount_outstanding)::numeric, 0) AS total_outstanding,
+            ROUND(
+                SUM(t_spread * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0)
+            ::numeric, 1) AS vw_spread,
+            ROUND(
+                SUM(yield * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0)
+            ::numeric, 3) AS vw_yield,
+            ROUND(
+                SUM(ret_eom * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0)
+            ::numeric, 6) AS vw_return
+        FROM wrdsapps_bondret.bondret
+        WHERE date BETWEEN :start_date AND :end_date
+          AND company_symbol IS NOT NULL
+          AND t_spread IS NOT NULL
+          AND ret_eom IS NOT NULL
+          AND ret_eom > -1
+          {where_extra}
+        GROUP BY date
+        ORDER BY date
+    """
+
+    try:
+        df = conn.raw_sql(query, params=params)
+    except Exception as e:
+        raise ToolError(f"Benchmark query failed: {e}")
+
+    if df.empty:
+        return {
+            "filters_applied": filters_applied,
+            "monthly_data": [{"message": "No benchmark data for the specified period."}],
+        }
+
+    records = df_to_records(df)
+
+    # Compute cumulative return
+    cum_return = 1.0
+    for r in records:
+        if r.get("vw_return") is not None:
+            cum_return *= (1 + r["vw_return"])
+            r["cumulative_vw_return"] = round(cum_return - 1, 6)
+
+    return {
+        "filters_applied": filters_applied,
+        "period": {"start": start_date, "end": end_date},
+        "months": len(records),
+        "summary": {
+            "avg_spread_bps": round(sum(r.get("vw_spread", 0) or 0 for r in records) / len(records), 1) if records else None,
+            "cumulative_vw_return": round(cum_return - 1, 4),
+            "total_months": len(records),
+        },
+        "monthly_data": records,
+    }
+
+
+# --- Tool 4: get_relative_value ---
+
+@screening_mcp.tool
+def get_relative_value(
+    ticker: Annotated[str, Field(description="Company ticker symbol")],
+    ctx: Context = None,
+) -> dict:
+    """Compare an issuer's bonds to rating-category and sector peers.
+
+    For the given issuer, shows each bond's spread, yield, and return vs
+    the average for bonds in the same rating category and (if available)
+    same sector. Helps identify if bonds are cheap or rich relative to peers.
+
+    Returns: dict with issuer bonds, peer_stats (rating-based averages),
+    and per-bond relative value metrics (spread_vs_peers, yield_vs_peers).
+
+    Example: get_relative_value("F")
+    """
+    ticker = validate_ticker(ticker)
+    conn = get_wrds_connection()
+    latest_month = _detect_latest_full_month(conn)
+
+    # Get issuer's bonds and their rating category
+    try:
+        issuer_df = conn.raw_sql("""
+            SELECT
+                b.cusip,
+                b.company_symbol AS ticker,
+                fi.coupon,
+                fi.maturity::text AS maturity,
+                fi.security_level,
+                b.amount_outstanding,
+                b.r_sp AS sp_rating,
+                b.r_mr AS moody_rating,
+                b.rating_cat,
+                b.rating_class,
+                ROUND(b.t_spread::numeric, 1) AS spread_bps,
+                ROUND(b.yield::numeric, 3) AS yield,
+                ROUND(b.price_eom::numeric, 3) AS price,
+                ROUND(b.duration::numeric, 2) AS duration,
+                ROUND(b.ret_eom::numeric, 4) AS return_1mo
+            FROM wrdsapps_bondret.bondret b
+            INNER JOIN fisd.fisd_mergedissue fi
+                ON b.cusip = fi.complete_cusip
+            WHERE b.date = :latest_month
+              AND UPPER(b.company_symbol) = :ticker
+              AND fi.asset_backed = 'N'
+              AND fi.convertible = 'N'
+            ORDER BY b.t_spread DESC NULLS LAST
+        """, params={"latest_month": latest_month, "ticker": ticker})
+    except Exception as e:
+        raise ToolError(f"Issuer query failed: {e}")
+
+    if issuer_df.empty:
+        return {"ticker": ticker, "message": f"No bonds found for {ticker} in latest bondret month."}
+
+    # Determine rating categories present
+    rating_cats = issuer_df["rating_cat"].dropna().unique().tolist()
+    rating_class_val = issuer_df["rating_class"].dropna().iloc[0] if not issuer_df["rating_class"].dropna().empty else None
+
+    # Get peer stats for each rating category
+    peer_stats = {}
+    if rating_cats:
+        cat_list = ", ".join(f"'{c}'" for c in rating_cats)
+        try:
+            peer_df = conn.raw_sql(f"""
+                SELECT
+                    b.rating_cat,
+                    COUNT(*) AS bond_count,
+                    COUNT(DISTINCT b.company_symbol) AS issuer_count,
+                    ROUND(AVG(b.t_spread)::numeric, 1) AS avg_spread,
+                    ROUND(PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY b.t_spread)::numeric, 1) AS spread_p25,
+                    ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY b.t_spread)::numeric, 1) AS spread_median,
+                    ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY b.t_spread)::numeric, 1) AS spread_p75,
+                    ROUND(AVG(b.yield)::numeric, 3) AS avg_yield,
+                    ROUND(AVG(b.duration)::numeric, 2) AS avg_duration,
+                    ROUND(AVG(b.price_eom)::numeric, 2) AS avg_price,
+                    ROUND(AVG(b.ret_eom)::numeric, 4) AS avg_return_1mo
+                FROM wrdsapps_bondret.bondret b
+                INNER JOIN fisd.fisd_mergedissue fi
+                    ON b.cusip = fi.complete_cusip
+                WHERE b.date = :latest_month
+                  AND b.rating_cat IN ({cat_list})
+                  AND b.company_symbol IS NOT NULL
+                  AND UPPER(b.company_symbol) != :ticker
+                  AND b.t_spread IS NOT NULL
+                  AND fi.asset_backed = 'N'
+                  AND fi.convertible = 'N'
+                GROUP BY b.rating_cat
+            """, params={"latest_month": latest_month, "ticker": ticker})
+
+            for _, row in peer_df.iterrows():
+                cat = row["rating_cat"]
+                peer_stats[cat] = {
+                    "bond_count": int(row["bond_count"]),
+                    "issuer_count": int(row["issuer_count"]),
+                    "avg_spread": float(row["avg_spread"]) if pd.notna(row.get("avg_spread")) else None,
+                    "spread_p25": float(row["spread_p25"]) if pd.notna(row.get("spread_p25")) else None,
+                    "spread_median": float(row["spread_median"]) if pd.notna(row.get("spread_median")) else None,
+                    "spread_p75": float(row["spread_p75"]) if pd.notna(row.get("spread_p75")) else None,
+                    "avg_yield": float(row["avg_yield"]) if pd.notna(row.get("avg_yield")) else None,
+                    "avg_duration": float(row["avg_duration"]) if pd.notna(row.get("avg_duration")) else None,
+                    "avg_price": float(row["avg_price"]) if pd.notna(row.get("avg_price")) else None,
+                    "avg_return_1mo": float(row["avg_return_1mo"]) if pd.notna(row.get("avg_return_1mo")) else None,
+                }
+        except Exception as e:
+            logger.warning("Peer stats query failed: %s", e)
+
+    # Build per-bond relative value
+    bonds = []
+    for _, row in issuer_df.iterrows():
+        bond: dict = {}
+        for col in issuer_df.columns:
+            val = row[col]
+            if pd.notna(val):
+                bond[col] = float(val) if isinstance(val, (int, float)) else str(val)
+
+        cat = row.get("rating_cat")
+        if cat and cat in peer_stats:
+            peers = peer_stats[cat]
+            if bond.get("spread_bps") is not None and peers.get("avg_spread") is not None:
+                bond["spread_vs_peers"] = round(bond["spread_bps"] - peers["avg_spread"], 1)
+                bond["spread_vs_median"] = round(bond["spread_bps"] - peers["spread_median"], 1) if peers.get("spread_median") else None
+                # Positive = wider than peers (cheap), negative = tighter (rich)
+                bond["relative_value"] = "cheap" if bond["spread_vs_peers"] > 20 else (
+                    "rich" if bond["spread_vs_peers"] < -20 else "fair"
+                )
+            if bond.get("yield") is not None and peers.get("avg_yield") is not None:
+                bond["yield_vs_peers"] = round(float(bond["yield"]) - peers["avg_yield"], 3)
+
+        bonds.append(bond)
+
+    return {
+        "ticker": ticker,
+        "as_of_date": latest_month,
+        "rating_class": rating_class_val,
+        "bond_count": len(bonds),
+        "peer_stats": peer_stats,
+        "bonds": bonds,
     }
