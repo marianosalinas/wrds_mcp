@@ -265,11 +265,13 @@ class TestGetLiquidityMetrics:
 class TestGetCreditSummary:
     """Tests for get_credit_summary tool."""
 
+    @patch("wrds_mcp.tools.loans.get_loan_terms")
+    @patch("wrds_mcp.tools.bonds.get_bond_covenants")
     @patch("wrds_mcp.tools.bonds.get_company_bonds")
     @patch("wrds_mcp.tools.ratings.get_credit_ratings")
     @patch("wrds_mcp.tools.financials.resolve_ticker_to_gvkey")
     @patch("wrds_mcp.tools.financials.get_wrds_connection")
-    def test_happy_path(self, mock_get_conn, mock_resolve, mock_ratings, mock_bonds):
+    def test_happy_path(self, mock_get_conn, mock_resolve, mock_ratings, mock_bonds, mock_covenants, mock_loans):
         mock_resolve.return_value = "001690"
         conn = MagicMock()
         conn.raw_sql.return_value = _make_funda_df()
@@ -284,6 +286,8 @@ class TestGetCreditSummary:
         mock_bonds.return_value = [
             {"cusip": "037833AK6", "coupon": 2.25, "maturity": "2026-05-01"},
         ]
+        mock_covenants.return_value = {"ticker": "AAPL", "bonds": [], "total_bonds": 0}
+        mock_loans.return_value = [{"message": "No syndicated loan data found"}]
 
         result = get_credit_summary("AAPL")
 
@@ -293,12 +297,15 @@ class TestGetCreditSummary:
         assert result["ratings"]["rating"] == "AA+"
         assert result["outstanding_bonds_count"] == 1
         assert result["as_of_date"] is not None
+        assert result["loan_facilities_count"] == 0
 
+    @patch("wrds_mcp.tools.loans.get_loan_terms")
+    @patch("wrds_mcp.tools.bonds.get_bond_covenants")
     @patch("wrds_mcp.tools.bonds.get_company_bonds")
     @patch("wrds_mcp.tools.ratings.get_credit_ratings")
     @patch("wrds_mcp.tools.financials.resolve_ticker_to_gvkey")
     @patch("wrds_mcp.tools.financials.get_wrds_connection")
-    def test_no_data(self, mock_get_conn, mock_resolve, mock_ratings, mock_bonds):
+    def test_no_data(self, mock_get_conn, mock_resolve, mock_ratings, mock_bonds, mock_covenants, mock_loans):
         mock_resolve.return_value = "999999"
         conn = MagicMock()
         conn.raw_sql.return_value = pd.DataFrame()
@@ -306,12 +313,15 @@ class TestGetCreditSummary:
 
         mock_ratings.return_value = {"ticker": "NEWCO", "rating": None, "message": "No ratings"}
         mock_bonds.return_value = [{"message": "No bonds found"}]
+        mock_covenants.return_value = {"ticker": "NEWCO", "bonds": []}
+        mock_loans.return_value = [{"message": "No syndicated loan data found"}]
 
         result = get_credit_summary("NEWCO")
 
         assert result["leverage"] is None
         assert result["outstanding_bonds_count"] == 0
         assert result["outstanding_bonds"] == []
+        assert result["loan_facilities_count"] == 0
 
     def test_invalid_ticker(self):
         with pytest.raises(ToolError):

@@ -7,8 +7,11 @@ from fastmcp import FastMCP
 
 from wrds_mcp.db.connection import wrds_lifespan
 from wrds_mcp.tools.bonds import bonds_mcp
-from wrds_mcp.tools.ratings import ratings_mcp
+from wrds_mcp.tools.catalog import catalog_mcp
+from wrds_mcp.tools.equity import equity_mcp
 from wrds_mcp.tools.financials import financials_mcp
+from wrds_mcp.tools.loans import loans_mcp
+from wrds_mcp.tools.ratings import ratings_mcp
 
 load_dotenv()
 
@@ -21,9 +24,12 @@ mcp = FastMCP(
     on_duplicate_tools="error",
 )
 
+mcp.mount(catalog_mcp)
+mcp.mount(equity_mcp)
 mcp.mount(bonds_mcp)
 mcp.mount(ratings_mcp)
 mcp.mount(financials_mcp)
+mcp.mount(loans_mcp)
 
 
 def main():

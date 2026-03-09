@@ -227,29 +227,35 @@ def get_credit_summary(
     ticker: Annotated[str, Field(description="Company ticker symbol")],
     ctx: Context = None,
 ) -> dict:
-    """Get a combined credit snapshot: leverage, coverage, ratings, and bonds.
+    """Get a combined credit snapshot: leverage, coverage, ratings, bonds, and covenants.
 
     Combines get_leverage_metrics (1 period), get_coverage_ratios (1 period),
-    get_credit_ratings, and get_company_bonds into a single credit profile.
+    get_credit_ratings, get_company_bonds, get_bond_covenants, and get_loan_terms
+    into a single credit profile.
 
     Returns: dict with keys: ticker, leverage, coverage, ratings,
-    outstanding_bonds, as_of_date.
+    outstanding_bonds, bond_covenants, loan_facilities, as_of_date.
 
     Example: get_credit_summary("AAPL")
     """
     ticker = validate_ticker(ticker)
 
-    from wrds_mcp.tools.bonds import get_company_bonds
+    from wrds_mcp.tools.bonds import get_company_bonds, get_bond_covenants
+    from wrds_mcp.tools.loans import get_loan_terms
     from wrds_mcp.tools.ratings import get_credit_ratings
 
     leverage = get_leverage_metrics(ticker, periods=1)
     coverage = get_coverage_ratios(ticker, periods=1)
     ratings = get_credit_ratings(ticker)
     bonds = get_company_bonds(ticker)
+    covenants = get_bond_covenants(ticker)
+    loans = get_loan_terms(ticker)
 
     # Extract the most recent data point (skip "message" entries)
     leverage_data = leverage[0] if leverage and "message" not in leverage[0] else None
     coverage_data = coverage[0] if coverage and "message" not in coverage[0] else None
+    has_bonds = bonds and "message" not in bonds[0]
+    has_loans = loans and "message" not in loans[0]
 
     as_of = None
     if leverage_data:
@@ -263,6 +269,38 @@ def get_credit_summary(
         "leverage": leverage_data,
         "coverage": coverage_data,
         "ratings": ratings,
-        "outstanding_bonds_count": len(bonds) if bonds and "message" not in bonds[0] else 0,
-        "outstanding_bonds": bonds if bonds and "message" not in bonds[0] else [],
+        "outstanding_bonds_count": len(bonds) if has_bonds else 0,
+        "outstanding_bonds": bonds if has_bonds else [],
+        "bond_covenants": covenants if isinstance(covenants, dict) and covenants.get("bonds") else None,
+        "loan_facilities_count": len(loans) if has_loans else 0,
+        "loan_facilities": loans if has_loans else [],
+    }
+
+
+@financials_mcp.tool
+def get_company_overview(
+    ticker: Annotated[str, Field(description="Company ticker symbol")],
+    ctx: Context = None,
+) -> dict:
+    """Get a complete company overview: stock performance + full credit profile.
+
+    Combines equity summary (latest price, 52-week range, YTD return)
+    with credit summary (leverage, coverage, ratings, bonds, loans).
+    This is the broadest single-call tool for company analysis.
+
+    Returns: dict with keys: ticker, equity, credit.
+
+    Example: get_company_overview("F")
+    """
+    ticker = validate_ticker(ticker)
+
+    from wrds_mcp.tools.equity import get_stock_summary
+
+    equity = get_stock_summary(ticker)
+    credit = get_credit_summary(ticker)
+
+    return {
+        "ticker": ticker,
+        "equity": equity,
+        "credit": credit,
     }
