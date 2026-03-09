@@ -56,8 +56,8 @@ def get_bond_transactions(
             ON t.cusip_id = fi.complete_cusip
         INNER JOIN fisd.fisd_mergedissuer fs
             ON fi.issuer_id = fs.issuer_id
-        WHERE UPPER(fs.ticker) = %(ticker)s
-          AND t.trd_exctn_dt BETWEEN %(start_date)s AND %(end_date)s
+        WHERE UPPER(fs.ticker) = :ticker
+          AND t.trd_exctn_dt BETWEEN :start_date AND :end_date
         ORDER BY t.trd_exctn_dt, t.trd_exctn_tm
     """
 
@@ -109,8 +109,8 @@ def get_bond_yield_history(
                SUM(entrd_vol_qt) AS total_volume,
                COUNT(*) AS num_trades
         FROM trace.trace_enhanced
-        WHERE cusip_id = %(cusip)s
-          AND trd_exctn_dt BETWEEN %(start_date)s AND %(end_date)s
+        WHERE cusip_id = :cusip
+          AND trd_exctn_dt BETWEEN :start_date AND :end_date
           AND yld_pt IS NOT NULL
         GROUP BY trd_exctn_dt
         ORDER BY trd_exctn_dt
@@ -168,7 +168,7 @@ def get_company_bonds(
         FROM fisd.fisd_mergedissue fi
         INNER JOIN fisd.fisd_mergedissuer fs
             ON fi.issuer_id = fs.issuer_id
-        WHERE UPPER(fs.ticker) = %(ticker)s
+        WHERE UPPER(fs.ticker) = :ticker
           AND fi.asset_backed = 'N'
           AND fi.convertible = 'N'
           AND fi.exchangeable = 'N'

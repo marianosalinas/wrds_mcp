@@ -72,7 +72,7 @@ def get_credit_ratings(
     query = """
         SELECT gvkey, datadate, splticrm, spsdrm, spsticrm
         FROM comp.adsprate
-        WHERE gvkey = %(gvkey)s
+        WHERE gvkey = :gvkey
           AND splticrm IS NOT NULL
         ORDER BY datadate DESC
         LIMIT 1
@@ -134,8 +134,8 @@ def get_ratings_history(
     query = """
         SELECT gvkey, datadate, splticrm
         FROM comp.adsprate
-        WHERE gvkey = %(gvkey)s
-          AND datadate BETWEEN %(start_date)s AND %(end_date)s
+        WHERE gvkey = :gvkey
+          AND datadate BETWEEN :start_date AND :end_date
           AND splticrm IS NOT NULL
         ORDER BY datadate
     """

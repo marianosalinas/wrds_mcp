@@ -45,10 +45,10 @@ def _query_funda(conn, gvkey: str, periods: int, columns: str) -> pd.DataFrame:
     query = f"""
         SELECT gvkey, datadate, fyear, {columns}
         FROM comp.funda
-        WHERE gvkey = %(gvkey)s
+        WHERE gvkey = :gvkey
           AND {FUNDA_FILTER}
         ORDER BY datadate DESC
-        LIMIT %(periods)s
+        LIMIT :periods
     """
     logger.debug("Querying comp.funda: gvkey=%s, periods=%d", gvkey, periods)
     return conn.raw_sql(

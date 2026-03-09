@@ -3,14 +3,43 @@
 import logging
 import os
 import time
+from urllib.parse import quote_plus
 
-import wrds
+import pandas as pd
+from sqlalchemy import create_engine, text
 from fastmcp.server.lifespan import lifespan
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 BACKOFF_BASE = 1  # seconds
+
+WRDS_HOST = "wrds-pgdata.wharton.upenn.edu"
+WRDS_PORT = 9737
+WRDS_DB = "wrds"
+
+
+class WRDSConnection:
+    """Thin wrapper around a SQLAlchemy engine to provide a raw_sql interface
+    compatible with the wrds library API."""
+
+    def __init__(self, engine):
+        self._engine = engine
+
+    def raw_sql(self, sql, params=None, date_cols=None, **kwargs):
+        """Execute a SQL query and return a DataFrame."""
+        with self._engine.connect() as conn:
+            result = pd.read_sql_query(
+                text(sql) if isinstance(sql, str) else sql,
+                con=conn,
+                params=params,
+                parse_dates=date_cols,
+            )
+        return result
+
+    def close(self):
+        """Dispose of the engine."""
+        self._engine.dispose()
 
 
 class WRDSConnectionManager:
@@ -28,13 +57,13 @@ class WRDSConnectionManager:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def connect(self) -> wrds.Connection:
+    def connect(self) -> WRDSConnection:
         """Establish a WRDS connection with retry logic.
 
         Retries up to 3 times with exponential backoff (1s, 2s, 4s).
 
         Returns:
-            wrds.Connection: An authenticated WRDS connection.
+            WRDSConnection: An authenticated WRDS connection.
 
         Raises:
             ConnectionError: If all retry attempts fail.
@@ -62,10 +91,15 @@ class WRDSConnectionManager:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 logger.debug("WRDS connection attempt %d/%d", attempt, MAX_RETRIES)
-                conn = wrds.Connection(
-                    wrds_username=username,
-                    wrds_password=password,
+                encoded_pwd = quote_plus(password)
+                engine = create_engine(
+                    f"postgresql+psycopg2://{username}:{encoded_pwd}"
+                    f"@{WRDS_HOST}:{WRDS_PORT}/{WRDS_DB}?sslmode=require",
+                    pool_pre_ping=True,
                 )
+                conn = WRDSConnection(engine)
+                # Verify connection works
+                conn.raw_sql("SELECT 1")
                 self._connection = conn
                 logger.info("WRDS connection established.")
                 return conn
@@ -102,12 +136,12 @@ class WRDSConnectionManager:
         cls._connection = None
 
 
-def get_wrds_connection() -> wrds.Connection:
+def get_wrds_connection() -> WRDSConnection:
     """Get the singleton WRDS connection."""
     return WRDSConnectionManager().connect()
 
 
-def resolve_ticker_to_gvkey(conn: wrds.Connection, ticker: str) -> str | None:
+def resolve_ticker_to_gvkey(conn: WRDSConnection, ticker: str) -> str | None:
     """Resolve a ticker symbol to a Compustat gvkey.
 
     Args:
@@ -122,7 +156,7 @@ def resolve_ticker_to_gvkey(conn: wrds.Connection, ticker: str) -> str | None:
         """
         SELECT DISTINCT gvkey
         FROM comp.security
-        WHERE tic = %(ticker)s
+        WHERE tic = :ticker
         ORDER BY gvkey
         LIMIT 1
         """,

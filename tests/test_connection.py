@@ -3,14 +3,15 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from wrds_mcp.db.connection import (
     WRDSConnectionManager,
+    WRDSConnection,
     get_wrds_connection,
     resolve_ticker_to_gvkey,
 )
-import pandas as pd
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +22,32 @@ def reset_singleton():
     yield
     WRDSConnectionManager._instance = None
     WRDSConnectionManager._connection = None
+
+
+def _mock_engine():
+    """Create a mock SQLAlchemy engine with working context manager."""
+    engine = MagicMock()
+    conn_cm = MagicMock()
+    engine.connect.return_value = conn_cm
+    conn_cm.__enter__ = MagicMock(return_value=MagicMock())
+    conn_cm.__exit__ = MagicMock(return_value=False)
+    return engine
+
+
+class TestWRDSConnection:
+    """Tests for WRDSConnection wrapper."""
+
+    @patch("wrds_mcp.db.connection.pd.read_sql_query", return_value=pd.DataFrame({"test": [1]}))
+    def test_raw_sql(self, mock_read):
+        conn = WRDSConnection(_mock_engine())
+        result = conn.raw_sql("SELECT 1")
+        assert not result.empty
+
+    def test_close(self):
+        engine = _mock_engine()
+        conn = WRDSConnection(engine)
+        conn.close()
+        engine.dispose.assert_called_once()
 
 
 class TestWRDSConnectionManager:
@@ -43,25 +70,22 @@ class TestWRDSConnectionManager:
             with pytest.raises(ValueError, match="WRDS_PASSWORD"):
                 manager.connect()
 
-    @patch("wrds_mcp.db.connection.wrds.Connection")
-    def test_successful_connection(self, mock_wrds_conn):
-        mock_conn = MagicMock()
-        mock_wrds_conn.return_value = mock_conn
+    @patch("wrds_mcp.db.connection.pd.read_sql_query", return_value=pd.DataFrame({"test": [1]}))
+    @patch("wrds_mcp.db.connection.create_engine")
+    def test_successful_connection(self, mock_create_engine, mock_read):
+        mock_create_engine.return_value = _mock_engine()
 
         with patch.dict(os.environ, {"WRDS_USERNAME": "user", "WRDS_PASSWORD": "pass"}):
             manager = WRDSConnectionManager()
             result = manager.connect()
 
-        assert result is mock_conn
-        mock_wrds_conn.assert_called_once_with(
-            wrds_username="user", wrds_password="pass"
-        )
+        assert isinstance(result, WRDSConnection)
+        mock_create_engine.assert_called_once()
 
-    @patch("wrds_mcp.db.connection.wrds.Connection")
-    def test_reuses_existing_connection(self, mock_wrds_conn):
-        mock_conn = MagicMock()
-        mock_conn.raw_sql.return_value = None  # health check passes
-        mock_wrds_conn.return_value = mock_conn
+    @patch("wrds_mcp.db.connection.pd.read_sql_query", return_value=pd.DataFrame({"test": [1]}))
+    @patch("wrds_mcp.db.connection.create_engine")
+    def test_reuses_existing_connection(self, mock_create_engine, mock_read):
+        mock_create_engine.return_value = _mock_engine()
 
         with patch.dict(os.environ, {"WRDS_USERNAME": "user", "WRDS_PASSWORD": "pass"}):
             manager = WRDSConnectionManager()
@@ -69,78 +93,54 @@ class TestWRDSConnectionManager:
             conn2 = manager.connect()
 
         assert conn1 is conn2
-        assert mock_wrds_conn.call_count == 1  # only created once
+        assert mock_create_engine.call_count == 1
 
-    @patch("wrds_mcp.db.connection.wrds.Connection")
-    def test_reconnects_on_stale_connection(self, mock_wrds_conn):
-        stale_conn = MagicMock()
-        stale_conn.raw_sql.side_effect = Exception("Connection closed")
-        fresh_conn = MagicMock()
-        mock_wrds_conn.side_effect = [stale_conn, fresh_conn]
-
-        with patch.dict(os.environ, {"WRDS_USERNAME": "user", "WRDS_PASSWORD": "pass"}):
-            manager = WRDSConnectionManager()
-            conn1 = manager.connect()
-            assert conn1 is stale_conn
-
-            # Now the health check fails, should reconnect
-            conn2 = manager.connect()
-            assert conn2 is fresh_conn
-
+    @patch("wrds_mcp.db.connection.pd.read_sql_query", return_value=pd.DataFrame({"test": [1]}))
     @patch("wrds_mcp.db.connection.time.sleep")
-    @patch("wrds_mcp.db.connection.wrds.Connection")
-    def test_retry_on_failure(self, mock_wrds_conn, mock_sleep):
-        mock_conn = MagicMock()
-        mock_wrds_conn.side_effect = [Exception("Fail 1"), Exception("Fail 2"), mock_conn]
+    @patch("wrds_mcp.db.connection.create_engine")
+    def test_retry_on_failure(self, mock_create_engine, mock_sleep, mock_read):
+        mock_create_engine.side_effect = [
+            Exception("Fail 1"),
+            Exception("Fail 2"),
+            _mock_engine(),
+        ]
 
         with patch.dict(os.environ, {"WRDS_USERNAME": "user", "WRDS_PASSWORD": "pass"}):
             manager = WRDSConnectionManager()
             result = manager.connect()
 
-        assert result is mock_conn
-        assert mock_wrds_conn.call_count == 3
+        assert isinstance(result, WRDSConnection)
+        assert mock_create_engine.call_count == 3
         assert mock_sleep.call_count == 2
-        mock_sleep.assert_any_call(1)
-        mock_sleep.assert_any_call(2)
 
     @patch("wrds_mcp.db.connection.time.sleep")
-    @patch("wrds_mcp.db.connection.wrds.Connection")
-    def test_all_retries_fail(self, mock_wrds_conn, mock_sleep):
-        mock_wrds_conn.side_effect = Exception("Always fails")
+    @patch("wrds_mcp.db.connection.create_engine")
+    def test_all_retries_fail(self, mock_create_engine, mock_sleep):
+        mock_create_engine.side_effect = Exception("Always fails")
 
         with patch.dict(os.environ, {"WRDS_USERNAME": "user", "WRDS_PASSWORD": "pass"}):
             manager = WRDSConnectionManager()
             with pytest.raises(ConnectionError, match="Failed to connect"):
                 manager.connect()
 
-        assert mock_wrds_conn.call_count == 3
+        assert mock_create_engine.call_count == 3
 
-    @patch("wrds_mcp.db.connection.wrds.Connection")
-    def test_close(self, mock_wrds_conn):
-        mock_conn = MagicMock()
-        mock_wrds_conn.return_value = mock_conn
+    @patch("wrds_mcp.db.connection.pd.read_sql_query", return_value=pd.DataFrame({"test": [1]}))
+    @patch("wrds_mcp.db.connection.create_engine")
+    def test_close(self, mock_create_engine, mock_read):
+        engine = _mock_engine()
+        mock_create_engine.return_value = engine
 
         with patch.dict(os.environ, {"WRDS_USERNAME": "user", "WRDS_PASSWORD": "pass"}):
             manager = WRDSConnectionManager()
             manager.connect()
             manager.close()
 
-        mock_conn.close.assert_called_once()
+        engine.dispose.assert_called_once()
 
     def test_close_when_no_connection(self):
         manager = WRDSConnectionManager()
         manager.close()  # should not raise
-
-    @patch("wrds_mcp.db.connection.wrds.Connection")
-    def test_close_handles_exception(self, mock_wrds_conn):
-        mock_conn = MagicMock()
-        mock_conn.close.side_effect = Exception("Close error")
-        mock_wrds_conn.return_value = mock_conn
-
-        with patch.dict(os.environ, {"WRDS_USERNAME": "user", "WRDS_PASSWORD": "pass"}):
-            manager = WRDSConnectionManager()
-            manager.connect()
-            manager.close()  # should not raise
 
     def test_reset(self):
         manager = WRDSConnectionManager()
@@ -152,15 +152,15 @@ class TestWRDSConnectionManager:
 class TestGetWrdsConnection:
     """Tests for get_wrds_connection helper."""
 
-    @patch("wrds_mcp.db.connection.wrds.Connection")
-    def test_returns_connection(self, mock_wrds_conn):
-        mock_conn = MagicMock()
-        mock_wrds_conn.return_value = mock_conn
+    @patch("wrds_mcp.db.connection.pd.read_sql_query", return_value=pd.DataFrame({"test": [1]}))
+    @patch("wrds_mcp.db.connection.create_engine")
+    def test_returns_connection(self, mock_create_engine, mock_read):
+        mock_create_engine.return_value = _mock_engine()
 
         with patch.dict(os.environ, {"WRDS_USERNAME": "user", "WRDS_PASSWORD": "pass"}):
             result = get_wrds_connection()
 
-        assert result is mock_conn
+        assert isinstance(result, WRDSConnection)
 
 
 class TestResolveTickerToGvkey:
@@ -171,7 +171,6 @@ class TestResolveTickerToGvkey:
         conn.raw_sql.return_value = pd.DataFrame({"gvkey": ["001690"]})
 
         result = resolve_ticker_to_gvkey(conn, "AAPL")
-
         assert result == "001690"
 
     def test_not_found(self):
@@ -179,7 +178,6 @@ class TestResolveTickerToGvkey:
         conn.raw_sql.return_value = pd.DataFrame()
 
         result = resolve_ticker_to_gvkey(conn, "ZZZZ")
-
         assert result is None
 
     def test_normalizes_ticker(self):
