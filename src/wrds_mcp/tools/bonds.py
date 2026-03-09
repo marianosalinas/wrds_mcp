@@ -54,9 +54,12 @@ def get_bond_transactions(
         FROM trace.trace_enhanced t
         INNER JOIN fisd.fisd_mergedissue fi
             ON t.cusip_id = fi.complete_cusip
-        INNER JOIN fisd.fisd_mergedissuer fs
-            ON fi.issuer_id = fs.issuer_id
-        WHERE UPPER(fs.ticker) = :ticker
+        WHERE (UPPER(fi.ticker) = :ticker
+               OR fi.issuer_id IN (
+                   SELECT DISTINCT fi2.issuer_id
+                   FROM fisd.fisd_mergedissue fi2
+                   WHERE UPPER(fi2.ticker) = :ticker
+               ))
           AND t.trd_exctn_dt BETWEEN :start_date AND :end_date
         ORDER BY t.trd_exctn_dt, t.trd_exctn_tm
     """
@@ -164,11 +167,17 @@ def get_company_bonds(
                fi.offering_date,
                fi.security_level,
                fi.bond_type,
-               fi.coupon_type
+               fi.coupon_type,
+               fi.active_issue
         FROM fisd.fisd_mergedissue fi
         INNER JOIN fisd.fisd_mergedissuer fs
             ON fi.issuer_id = fs.issuer_id
-        WHERE UPPER(fs.ticker) = :ticker
+        WHERE (UPPER(fi.ticker) = :ticker
+               OR fi.issuer_id IN (
+                   SELECT DISTINCT fi2.issuer_id
+                   FROM fisd.fisd_mergedissue fi2
+                   WHERE UPPER(fi2.ticker) = :ticker
+               ))
           AND fi.asset_backed = 'N'
           AND fi.convertible = 'N'
           AND fi.exchangeable = 'N'
