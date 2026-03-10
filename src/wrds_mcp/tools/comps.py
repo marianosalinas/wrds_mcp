@@ -114,8 +114,8 @@ def get_comps_table(
                     company_symbol AS ticker,
                     COUNT(*) AS bond_count,
                     ROUND(SUM(amount_outstanding)::numeric, 0) AS total_amount_outstanding,
-                    ROUND(AVG(t_spread)::numeric, 1) AS avg_spread,
-                    ROUND(AVG(yield)::numeric, 3) AS avg_yield,
+                    ROUND((AVG(t_spread) * 10000)::numeric, 1) AS avg_spread,
+                    ROUND((AVG(yield) * 100)::numeric, 3) AS avg_yield,
                     ROUND(AVG(duration)::numeric, 2) AS avg_duration
                 FROM wrdsapps_bondret.bondret
                 WHERE date = :latest_month

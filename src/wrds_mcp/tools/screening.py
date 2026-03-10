@@ -451,12 +451,12 @@ def screen_bonds(
         filters_applied["maturity_before"] = maturity_before
 
     if min_spread is not None:
-        params["min_spread"] = min_spread
+        params["min_spread"] = min_spread / 10000  # Convert bps to decimal for DB comparison
         filters.append("b.t_spread >= :min_spread")
         filters_applied["min_spread"] = min_spread
 
     if max_spread is not None:
-        params["max_spread"] = max_spread
+        params["max_spread"] = max_spread / 10000  # Convert bps to decimal for DB comparison
         filters.append("b.t_spread <= :max_spread")
         filters_applied["max_spread"] = max_spread
 
@@ -525,8 +525,8 @@ def screen_bonds(
             b.r_mr AS moody_rating,
             b.rating_class,
             b.rating_cat,
-            ROUND(b.t_spread::numeric, 1) AS spread_bps,
-            ROUND(b.yield::numeric, 3) AS yield,
+            ROUND((b.t_spread * 10000)::numeric, 1) AS spread_bps,
+            ROUND((b.yield * 100)::numeric, 3) AS yield_pct,
             ROUND(b.price_eom::numeric, 3) AS price,
             ROUND(b.duration::numeric, 2) AS duration,
             ROUND(b.ret_eom::numeric, 4) AS return_1mo,
@@ -627,27 +627,28 @@ def get_market_benchmarks(
             date,
             COUNT(*) AS bond_count,
             COUNT(DISTINCT company_symbol) AS issuer_count,
-            ROUND(AVG(t_spread)::numeric, 1) AS avg_spread,
-            ROUND(AVG(yield)::numeric, 3) AS avg_yield,
+            ROUND((AVG(t_spread) * 10000)::numeric, 1) AS avg_spread,
+            ROUND((AVG(yield) * 100)::numeric, 3) AS avg_yield,
             ROUND(AVG(ret_eom)::numeric, 6) AS avg_return,
             ROUND(AVG(duration)::numeric, 2) AS avg_duration,
             ROUND(AVG(price_eom)::numeric, 2) AS avg_price,
             ROUND(SUM(amount_outstanding)::numeric, 0) AS total_outstanding,
             ROUND(
-                SUM(t_spread * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0)
-            ::numeric, 1) AS vw_spread,
+                (SUM(t_spread * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0) * 10000)::numeric
+            , 1) AS vw_spread,
             ROUND(
-                SUM(yield * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0)
-            ::numeric, 3) AS vw_yield,
+                (SUM(yield * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0) * 100)::numeric
+            , 3) AS vw_yield,
             ROUND(
-                SUM(ret_eom * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0)
-            ::numeric, 6) AS vw_return
+                (SUM(ret_eom * amount_outstanding) / NULLIF(SUM(amount_outstanding), 0))::numeric
+            , 6) AS vw_return
         FROM wrdsapps_bondret.bondret
         WHERE date BETWEEN :start_date AND :end_date
           AND company_symbol IS NOT NULL
           AND t_spread IS NOT NULL
           AND ret_eom IS NOT NULL
           AND ret_eom > -1
+          AND yield BETWEEN 0 AND 1
           {where_extra}
         GROUP BY date
         ORDER BY date
@@ -722,8 +723,8 @@ def get_relative_value(
                 b.r_mr AS moody_rating,
                 b.rating_cat,
                 b.rating_class,
-                ROUND(b.t_spread::numeric, 1) AS spread_bps,
-                ROUND(b.yield::numeric, 3) AS yield,
+                ROUND((b.t_spread * 10000)::numeric, 1) AS spread_bps,
+                ROUND((b.yield * 100)::numeric, 3) AS yield_pct,
                 ROUND(b.price_eom::numeric, 3) AS price,
                 ROUND(b.duration::numeric, 2) AS duration,
                 ROUND(b.ret_eom::numeric, 4) AS return_1mo
@@ -756,11 +757,11 @@ def get_relative_value(
                     b.rating_cat,
                     COUNT(*) AS bond_count,
                     COUNT(DISTINCT b.company_symbol) AS issuer_count,
-                    ROUND(AVG(b.t_spread)::numeric, 1) AS avg_spread,
-                    ROUND(PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY b.t_spread)::numeric, 1) AS spread_p25,
-                    ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY b.t_spread)::numeric, 1) AS spread_median,
-                    ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY b.t_spread)::numeric, 1) AS spread_p75,
-                    ROUND(AVG(b.yield)::numeric, 3) AS avg_yield,
+                    ROUND((AVG(b.t_spread) * 10000)::numeric, 1) AS avg_spread,
+                    ROUND((PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY b.t_spread) * 10000)::numeric, 1) AS spread_p25,
+                    ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY b.t_spread) * 10000)::numeric, 1) AS spread_median,
+                    ROUND((PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY b.t_spread) * 10000)::numeric, 1) AS spread_p75,
+                    ROUND((AVG(b.yield) * 100)::numeric, 3) AS avg_yield,
                     ROUND(AVG(b.duration)::numeric, 2) AS avg_duration,
                     ROUND(AVG(b.price_eom)::numeric, 2) AS avg_price,
                     ROUND(AVG(b.ret_eom)::numeric, 4) AS avg_return_1mo
@@ -813,8 +814,8 @@ def get_relative_value(
                 bond["relative_value"] = "cheap" if bond["spread_vs_peers"] > 20 else (
                     "rich" if bond["spread_vs_peers"] < -20 else "fair"
                 )
-            if bond.get("yield") is not None and peers.get("avg_yield") is not None:
-                bond["yield_vs_peers"] = round(float(bond["yield"]) - peers["avg_yield"], 3)
+            if bond.get("yield_pct") is not None and peers.get("avg_yield") is not None:
+                bond["yield_vs_peers"] = round(float(bond["yield_pct"]) - peers["avg_yield"], 3)
 
         bonds.append(bond)
 

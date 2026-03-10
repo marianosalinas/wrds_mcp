@@ -158,7 +158,7 @@ def _make_bond_df(**overrides):
         "rating_class": ["1.HY"],
         "rating_cat": ["BB"],
         "spread_bps": [150.3],
-        "yield": [5.812],
+        "yield_pct": [5.812],
         "price": [98.5],
         "duration": [2.35],
         "return_1mo": [0.008],
@@ -679,7 +679,7 @@ class TestScreenBonds:
             "rating_class": ["1.HY", "1.HY"],
             "rating_cat": ["BB", "BB"],
             "spread_bps": [150.3, 220.1],
-            "yield": [5.812, 6.543],
+            "yield_pct": [5.812, 6.543],
             "price": [98.5, 97.2],
             "duration": [2.35, 3.10],
             "return_1mo": [0.008, 0.005],
@@ -834,7 +834,7 @@ def _make_issuer_bonds_df():
         "rating_cat": ["BB", "BB"],
         "rating_class": ["1.HY", "1.HY"],
         "spread_bps": [200.0, 250.0],
-        "yield": [5.8, 6.3],
+        "yield_pct": [5.8, 6.3],
         "price": [98.5, 97.2],
         "duration": [2.35, 3.10],
         "return_1mo": [0.008, 0.005],
@@ -897,7 +897,7 @@ class TestGetRelativeValue:
             "rating_cat": ["BB"],
             "rating_class": ["1.HY"],
             "spread_bps": [140.0],  # Tight spread
-            "yield": [5.0],
+            "yield_pct": [5.0],
             "price": [100.5],
             "duration": [2.35],
             "return_1mo": [0.008],
@@ -951,7 +951,7 @@ class TestGetRelativeValue:
 
         result = get_relative_value("F")
 
-        # First bond yield 5.8, peer avg 5.5 => +0.3
+        # First bond yield_pct 5.8, peer avg 5.5 => +0.3
         assert result["bonds"][0]["yield_vs_peers"] == 0.3
 
     @patch("wrds_mcp.tools.screening.get_wrds_connection")
