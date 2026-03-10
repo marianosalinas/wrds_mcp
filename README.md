@@ -4,10 +4,12 @@ An MCP server that gives AI assistants (Claude Code, Claude Desktop, etc.) natur
 
 **29 tools** across bonds, credit ratings, financials, equity, loans, screening, and comps — plus a guarded SQL escape hatch and schema discovery for ad-hoc analysis.
 
+> **Requires a WRDS account.** This tool is a client for [WRDS (Wharton Research Data Services)](https://wrds-www.wharton.upenn.edu/). You must have your own WRDS subscription (academic or institutional) to use it. This project is not affiliated with, endorsed by, or sponsored by WRDS or the Wharton School.
+
 ## Prerequisites
 
 - Python 3.10+
-- A [WRDS](https://wrds-www.wharton.upenn.edu/) account (academic or institutional)
+- A [WRDS](https://wrds-www.wharton.upenn.edu/) account with access to the datasets you want to query (CRSP, Compustat, TRACE, FISD, DealScan, etc.)
 
 ## Installation
 
@@ -210,6 +212,14 @@ pytest
 ```
 
 307 tests, 90% coverage. All tests mock the WRDS connection — no credentials needed to run them.
+
+## Disclaimer
+
+This project is an independent, open-source tool. It is **not affiliated with, endorsed by, or sponsored by WRDS, the Wharton School, or the University of Pennsylvania**.
+
+- You are responsible for complying with your WRDS subscription terms and any data redistribution restrictions.
+- This tool provides read-only access to data you are already licensed to use — it does not bypass any access controls.
+- Nothing in this tool constitutes financial advice. Data is provided as-is for research and analysis purposes.
 
 ## License
 
