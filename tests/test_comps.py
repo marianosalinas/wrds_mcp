@@ -197,3 +197,94 @@ class TestGetCompsTable:
         result = get_comps_table(["f"])
 
         assert result["tickers"] == ["F"]
+
+    @patch("wrds_mcp.tools.comps.resolve_ticker_to_fisd_issuer")
+    @patch("wrds_mcp.tools.comps.get_wrds_connection")
+    def test_144a_fallback_when_bondret_empty(self, mock_get_conn, mock_resolve):
+        """Ticker missing from bondret but has 144A bonds in FISD."""
+        mock_resolve.return_value = 50251  # FISD issuer_id
+
+        fisd_df = pd.DataFrame({
+            "issuer_id": [50251],
+            "bond_count": [3],
+            "total_offering_amt": [1452.0],
+            "earliest_issue": ["2020-04-21"],
+            "latest_maturity": ["2029-08-15"],
+            "has_144a": [True],
+        })
+
+        latest_month_df = pd.DataFrame({"date": ["2025-03-31"], "n": [800]})
+        conn = MagicMock()
+        conn.raw_sql.side_effect = [
+            latest_month_df,   # _detect_latest_full_month
+            pd.DataFrame(),    # ratings (empty — not in bondret)
+            pd.DataFrame({     # financials
+                "ticker": ["PRKS"],
+                "company_name": ["United Parks & Resorts"],
+                "sic_code": [7990],
+                "revenue": [1800.0], "ebitda": [700.0],
+                "total_debt": [3000.0], "net_debt": [2700.0],
+                "cash": [300.0], "leverage": [4.29],
+                "interest_coverage": [3.0], "market_cap": [4000.0],
+                "financials_date": ["2024-12-31"],
+            }),
+            pd.DataFrame(),    # bonds from bondret (empty)
+            fisd_df,           # FISD fallback query
+            pd.DataFrame(),    # equity returns
+        ]
+        mock_get_conn.return_value = conn
+
+        result = get_comps_table(["PRKS"])
+
+        comp = result["comps"][0]
+        assert comp["ticker"] == "PRKS"
+        assert comp["bond_count"] == 3
+        assert comp["total_offering_amt"] == 1452.0
+        assert comp["bond_data_source"] == "fisd"
+        assert "144A" in comp["note_144a"]
+        assert "sp_rating" not in comp  # no ratings from bondret
+
+    @patch("wrds_mcp.tools.comps.resolve_ticker_to_fisd_issuer")
+    @patch("wrds_mcp.tools.comps.get_wrds_connection")
+    def test_144a_fallback_not_triggered_when_bondret_has_data(self, mock_get_conn, mock_resolve):
+        """Ticker present in bondret — FISD fallback should NOT be used."""
+        bonds_df = pd.DataFrame({
+            "ticker": ["F"],
+            "bond_count": [25],
+            "total_amount_outstanding": [30000.0],
+            "avg_spread": [200.5],
+            "avg_yield": [5.8],
+            "avg_duration": [4.2],
+        })
+        conn = _make_conn_with_responses(
+            pd.DataFrame(),  # ratings
+            pd.DataFrame(),  # financials
+            bonds_df,        # bonds from bondret
+            pd.DataFrame(),  # equity
+        )
+        mock_get_conn.return_value = conn
+
+        result = get_comps_table(["F"])
+
+        comp = result["comps"][0]
+        assert comp["bond_count"] == 25
+        assert "bond_data_source" not in comp
+        assert "note_144a" not in comp
+        mock_resolve.assert_not_called()
+
+    @patch("wrds_mcp.tools.comps.resolve_ticker_to_fisd_issuer")
+    @patch("wrds_mcp.tools.comps.get_wrds_connection")
+    def test_144a_fallback_no_fisd_match(self, mock_get_conn, mock_resolve):
+        """Ticker not in bondret AND not resolvable in FISD — no bond data."""
+        mock_resolve.return_value = None
+
+        conn = _make_conn_with_responses(
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        )
+        mock_get_conn.return_value = conn
+
+        result = get_comps_table(["ZZZZ"])
+
+        comp = result["comps"][0]
+        assert "bond_count" not in comp
+        assert "bond_data_source" not in comp

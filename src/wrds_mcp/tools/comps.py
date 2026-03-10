@@ -8,7 +8,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from wrds_mcp.db.connection import get_wrds_connection
+from wrds_mcp.db.connection import get_wrds_connection, resolve_ticker_to_fisd_issuer
 from wrds_mcp.tools._validation import validate_ticker
 
 logger = logging.getLogger(__name__)
@@ -125,6 +125,41 @@ def get_comps_table(
         except Exception as e:
             logger.warning("Bond summary query failed: %s", e)
 
+    # 3b. FISD fallback for tickers missing from bondret (covers 144A bonds)
+    bondret_tickers = set(bonds_df["ticker"].str.upper()) if not bonds_df.empty else set()
+    missing_tickers = [t for t in clean_tickers if t not in bondret_tickers]
+    fisd_fallback_df = pd.DataFrame()
+    if missing_tickers:
+        try:
+            # Resolve each missing ticker to FISD issuer_id via Compustat CUSIP
+            issuer_ids = {}
+            for t in missing_tickers:
+                iid = resolve_ticker_to_fisd_issuer(conn, t)
+                if iid is not None:
+                    issuer_ids[t] = iid
+
+            if issuer_ids:
+                # Query FISD for bond summary per issuer_id
+                id_to_ticker = {v: k for k, v in issuer_ids.items()}
+                id_list = ", ".join(str(iid) for iid in issuer_ids.values())
+                fisd_fallback_df = conn.raw_sql(f"""
+                    SELECT
+                        fi.issuer_id,
+                        COUNT(*) AS bond_count,
+                        ROUND(SUM(fi.offering_amt)::numeric / 1000, 0) AS total_offering_amt,
+                        MIN(fi.offering_date)::text AS earliest_issue,
+                        MAX(fi.maturity)::text AS latest_maturity,
+                        BOOL_OR(COALESCE(fi.rule_144a, 'N') = 'Y') AS has_144a
+                    FROM fisd.fisd_mergedissue fi
+                    WHERE fi.issuer_id IN ({id_list})
+                      AND fi.maturity > CURRENT_DATE
+                    GROUP BY fi.issuer_id
+                """)
+                if not fisd_fallback_df.empty:
+                    fisd_fallback_df["ticker"] = fisd_fallback_df["issuer_id"].map(id_to_ticker)
+        except Exception as e:
+            logger.warning("FISD fallback query failed: %s", e)
+
     # 4. Equity returns from CRSP
     date_1mo = (latest_dt - relativedelta(months=1)).strftime("%Y-%m-%d")
     date_3mo = (latest_dt - relativedelta(months=3)).strftime("%Y-%m-%d")
@@ -194,6 +229,19 @@ def get_comps_table(
                 entry["avg_spread_bps"] = float(row["avg_spread"]) if pd.notna(row.get("avg_spread")) else None
                 entry["avg_yield"] = float(row["avg_yield"]) if pd.notna(row.get("avg_yield")) else None
                 entry["avg_duration"] = float(row["avg_duration"]) if pd.notna(row.get("avg_duration")) else None
+
+        # FISD fallback (144A bonds not in bondret)
+        if "bond_count" not in entry and not fisd_fallback_df.empty:
+            fb = fisd_fallback_df[fisd_fallback_df["ticker"] == ticker]
+            if not fb.empty:
+                row = fb.iloc[0]
+                entry["bond_count"] = int(row["bond_count"])
+                entry["total_offering_amt"] = float(row["total_offering_amt"]) if pd.notna(row.get("total_offering_amt")) else None
+                entry["earliest_issue"] = str(row["earliest_issue"]) if pd.notna(row.get("earliest_issue")) else None
+                entry["latest_maturity"] = str(row["latest_maturity"]) if pd.notna(row.get("latest_maturity")) else None
+                entry["bond_data_source"] = "fisd"
+                if row.get("has_144a"):
+                    entry["note_144a"] = "Bond data from FISD (144A private placements — no secondary market pricing in bondret)"
 
         # Equity returns
         if not eq_df.empty:

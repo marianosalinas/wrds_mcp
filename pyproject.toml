@@ -6,6 +6,9 @@ build-backend = "hatchling.build"
 name = "wrds-mcp"
 version = "0.1.0"
 description = "MCP server for WRDS financial data access — credit analysis tools"
+license = "MIT"
+authors = [{name = "Mariano Salinas"}]
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=3.0",
